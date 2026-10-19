@@ -3,7 +3,7 @@
 // 2) 뼈대를 끝점·교차점 사이 선들로 나눠
 // 3) 직선은 그림의 주요 방향으로 정렬한 선분, 곡선은 매끈한 베지어로 맞추고
 // 4) 선마다 원본 단면에서 굵기·진하기를 재서 일정한 굵기의 획으로 만든다.
-import { fitCubic } from './fit.js?v=37556a61';
+import { fitCubic } from './fit.js?v=c6dbac93';
 
 const DEG = Math.PI / 180;
 
@@ -569,6 +569,110 @@ function arcFit(q) {
   return { segs, start: [cx + r * Math.cos(a0), cy + r * Math.sin(a0)] };
 }
 
+// 마지막 선 끝 정리: 모든 열린 끝을 가장 가까운 다른 선에 정확히 붙이고(틈 메우기·삐져나감 자르기), 꼬다리 제거
+function finalizeEnds(strokes, r) {
+  const flat = (st) => {
+    const pts = [st.start];
+    let p = st.start;
+    for (const g of st.segs) {
+      if (g.t === 'L') pts.push([g.x, g.y]);
+      else for (let i = 1; i <= 4; i++) { const t = i / 4, u = 1 - t; pts.push([u * u * u * p[0] + 3 * u * u * t * g.x1 + 3 * u * t * t * g.x2 + t * t * t * g.x, u * u * u * p[1] + 3 * u * u * t * g.y1 + 3 * u * t * t * g.y2 + t * t * t * g.y]); }
+      p = [g.x, g.y];
+    }
+    return pts;
+  };
+  const lenOf = (pts) => { let L = 0; for (let i = 1; i < pts.length; i++) L += dist2(pts[i], pts[i - 1]); return L; };
+  const segs = [];
+  const C = 6, grid = new Map();
+  strokes.forEach((st, k) => {
+    const pts = flat(st);
+    for (let i = 0; i < pts.length - 1; i++) {
+      const j = segs.length;
+      segs.push([k, pts[i], pts[i + 1]]);
+      const a = pts[i], b = pts[i + 1];
+      for (let x = Math.floor(Math.min(a[0], b[0]) / C); x <= Math.floor(Math.max(a[0], b[0]) / C); x++)
+        for (let y = Math.floor(Math.min(a[1], b[1]) / C); y <= Math.floor(Math.max(a[1], b[1]) / C); y++) {
+          const kk = x + ',' + y; if (!grid.has(kk)) grid.set(kk, []); grid.get(kk).push(j);
+        }
+    }
+  });
+  const drop = new Set();
+  strokes.forEach((st, k) => {
+    if (st.closed || st.cap === 'butt') return;
+    for (const atStart of [true, false]) {
+      const pts = flat(st);
+      const L = lenOf(pts);
+      const seq = atStart ? pts : pts.slice().reverse();
+      const e = seq[0];
+      // 방향: 끝에서 3px 이상 안쪽 점 기준
+      let q = seq[1], acc = dist2(seq[0], seq[1]);
+      for (let i = 2; i < seq.length && acc < 3; i++) { acc += dist2(seq[i], seq[i - 1]); q = seq[i]; }
+      const dx = e[0] - q[0], dy = e[1] - q[1], dl = Math.hypot(dx, dy);
+      if (dl < 0.5) continue;
+      const ux = dx / dl, uy = dy / dl;
+      const cand = new Set();
+      for (let gx = -1; gx <= 1; gx++) for (let gy = -1; gy <= 1; gy++) for (const j of grid.get((Math.floor(e[0] / C) + gx) + ',' + (Math.floor(e[1] / C) + gy)) || []) cand.add(j);
+      let bestT = Infinity;
+      for (const j of cand) {
+        const [kk, a, b] = segs[j];
+        if (kk === k || drop.has(kk)) continue;
+        const sx = b[0] - a[0], sy = b[1] - a[1], sl = Math.hypot(sx, sy);
+        if (sl < 1e-6) continue;
+        const den = ux * sy - uy * sx;
+        if (Math.abs(den) < sl * Math.sin(20 * DEG)) continue;
+        const t = ((a[0] - e[0]) * sy - (a[1] - e[1]) * sx) / den, u = ((a[0] - e[0]) * uy - (a[1] - e[1]) * ux) / den;
+        if (u < -0.03 || u > 1.03 || t > r || t < -r) continue;
+        if (t < 0 && -t > L * 0.6) continue; // 자르면 선 대부분이 사라짐
+        if (Math.abs(t) < Math.abs(bestT)) bestT = t;
+      }
+      if (bestT === Infinity || Math.abs(bestT) < 0.15) continue;
+      const X = [e[0] + ux * bestT, e[1] + uy * bestT];
+      if (bestT > 0) {
+        // 늘리기: 끝 직선 연장
+        if (atStart) { st.segs.unshift({ t: 'L', x: st.start[0], y: st.start[1] }); st.start = X; }
+        else st.segs.push({ t: 'L', x: X[0], y: X[1] });
+      } else {
+        // 자르기: 끝에서 |t|만큼 잘라낸다(직선 조각만 처리)
+        let cut = -bestT;
+        if (atStart) {
+          while (st.segs.length > 1 && st.segs[0].t === 'L' && dist2(st.start, [st.segs[0].x, st.segs[0].y]) <= cut + 1e-6) {
+            cut -= dist2(st.start, [st.segs[0].x, st.segs[0].y]); st.start = [st.segs[0].x, st.segs[0].y]; st.segs.shift();
+          }
+          st.start = X;
+        } else {
+          const prevPt = (m) => (m === 0 ? st.start : [st.segs[m - 1].x, st.segs[m - 1].y]);
+          while (st.segs.length > 1 && st.segs[st.segs.length - 1].t === 'L' && dist2(prevPt(st.segs.length - 1), [st.segs[st.segs.length - 1].x, st.segs[st.segs.length - 1].y]) <= cut + 1e-6) {
+            const m = st.segs.length - 1;
+            cut -= dist2(prevPt(m), [st.segs[m].x, st.segs[m].y]); st.segs.pop();
+          }
+          const g = st.segs[st.segs.length - 1];
+          if (g.t === 'L') { g.x = X[0]; g.y = X[1]; } else st.segs.push({ t: 'L', x: X[0], y: X[1] });
+        }
+      }
+    }
+  });
+  // 꼬다리 제거: 5px 미만이고 다른 선에 붙어 있거나, 2.5px 미만 부스러기
+  strokes.forEach((st, k) => {
+    if (st.closed || st.cap === 'butt') return;
+    const pts = flat(st), L = lenOf(pts);
+    if (L >= 5) return;
+    if (L < 2.5) { drop.add(k); return; }
+    for (const e of [pts[0], pts[pts.length - 1]]) {
+      for (const j of grid.get(Math.floor(e[0] / C) + ',' + Math.floor(e[1] / C)) || []) {
+        const [kk, a, b] = segs[j];
+        if (kk === k) continue;
+        const sx = b[0] - a[0], sy = b[1] - a[1], l2 = sx * sx + sy * sy || 1;
+        const t = Math.max(0, Math.min(1, ((e[0] - a[0]) * sx + (e[1] - a[1]) * sy) / l2));
+        if (dist2(e, [a[0] + sx * t, a[1] + sy * t]) < 1.2) { drop.add(k); return; }
+      }
+    }
+  });
+  if (drop.size) {
+    const keep = strokes.filter((_, k) => !drop.has(k));
+    strokes.length = 0; strokes.push(...keep);
+  }
+}
+
 // 선 끝 펴기: 끝 2.5px 안에서 안쪽 직선(끝에서 2~8px 구간)을 벗어나 굽은 점은 그 직선 위로 옮긴다.
 // 교차점 근처에서 뼈대가 휘는 현상 때문에 T자·모서리가 둥글게 나오는 것을 막는다.
 function straightenEnds(p) {
@@ -1054,6 +1158,8 @@ export function extractStrokes(m, w, h, o = {}) {
     st.closed = true;
   }
   weldEnds(strokes, 6);
+  finalizeEnds(strokes, 5);
+  finalizeEnds(strokes, 5);
   for (const d of dashes) {
     let s1 = snap({ dx: d.ux, dy: d.uy, mx: d.cx, my: d.cy });
     const hl = d.len / 2;

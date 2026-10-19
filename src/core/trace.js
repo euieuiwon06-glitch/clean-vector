@@ -1,7 +1,7 @@
-import { compositeOnWhite, buildPalette, unmix, denoise } from './palette.js?v=37556a61';
-import { extractStrokes, inkCoverage } from './strokes.js?v=37556a61';
-import { maskBounds, upsample, gaussianBlur, preserveThin, marchingSquares } from './contour.js?v=37556a61';
-import { resampleClosed, analyzeContour, alignRuns, equalizeStrokes, buildPath, fitCircle, snapConcentric } from './fit.js?v=37556a61';
+import { compositeOnWhite, buildPalette, unmix, denoise } from './palette.js?v=c6dbac93';
+import { extractStrokes, inkCoverage } from './strokes.js?v=c6dbac93';
+import { maskBounds, upsample, gaussianBlur, preserveThin, marchingSquares } from './contour.js?v=c6dbac93';
+import { resampleClosed, analyzeContour, alignRuns, equalizeStrokes, buildPath, fitCircle, snapConcentric } from './fit.js?v=c6dbac93';
 
 export const DEFAULTS = {
   colors: 'auto',   // 대표색 개수(숫자 또는 auto)
