@@ -51,7 +51,7 @@ function onWorker(e) {
 function progress(p, label) {
   const bar = $('#progress');
   bar.classList.toggle('on', p > 0 && p < 1);
-  bar.firstElementChild.style.width = `${Math.round(p * 100)}%`;
+  bar.firstElementChild.style.transform = `scaleX(${p})`;
   if (label) $('#status').textContent = label;
   if (p >= 1) $('#status').textContent = '';
 }

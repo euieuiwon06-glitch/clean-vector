@@ -148,7 +148,7 @@ button { font: inherit; color: inherit; }
 
 .progress { position: absolute; left: 0; right: 0; top: 0; height: 2px; opacity: 0; transition: opacity .2s; }
 .progress.on { opacity: 1; }
-.progress i { display: block; height: 100%; width: 0; background: var(--accent); transition: width .2s; }
+.progress i { display: block; height: 100%; width: 100%; background: var(--accent); transform: scaleX(0); transform-origin: 0 50%; transition: transform .2s; }
 
 [hidden] { display: none !important; }
 
