@@ -136,11 +136,16 @@ export function analyzeContour(c, o) {
   const { n } = c;
   const step = o.step;
   const circ = fitCircle(c.xs, c.ys, n);
-  if (circ && circ.r >= 0.7 && circ.maxd <= Math.max(o.circleTol, circ.r * 0.035)) {
+  // 원·타원은 모양 오차뿐 아니라 둘레·면적도 맞아야 한다(작은 조각이 거대한 원으로 맞춰지는 것 방지)
+  const near = (v, ref) => Math.abs(v - ref) <= ref * 0.12;
+  if (circ && circ.r >= 0.7 && circ.maxd <= Math.max(o.circleTol, Math.min(circ.r * 0.035, 0.8))
+    && near(c.length, 2 * Math.PI * circ.r) && near(c.area, Math.PI * circ.r * circ.r)) {
     return { kind: 'circle', cx: circ.cx, cy: circ.cy, r: circ.r };
   }
   const ell = fitEllipse(c.xs, c.ys, n);
-  if (ell && Math.min(ell.rx, ell.ry) >= 1 && ell.maxd <= Math.max(o.circleTol * 1.4, Math.min(ell.rx, ell.ry) * 0.035)) {
+  if (ell && Math.min(ell.rx, ell.ry) >= 1 && ell.maxd <= Math.max(o.circleTol * 1.4, Math.min(Math.min(ell.rx, ell.ry) * 0.035, 0.8))
+    && near(c.area, Math.PI * ell.rx * ell.ry)
+    && near(c.length, Math.PI * (3 * (ell.rx + ell.ry) - Math.sqrt((3 * ell.rx + ell.ry) * (ell.rx + 3 * ell.ry))))) {
     return { kind: 'ellipse', ...ell };
   }
   const w = Math.max(2, Math.round(1.0 / step));
@@ -554,6 +559,27 @@ const projOn = (R, x, y) => {
 };
 const distLine = (R, x, y) => Math.abs((x - R.mx) * -R.dy + (y - R.my) * R.dx);
 
+// 윤곽 범위를 크게 벗어나는 점·핸들이 있는 조각(엉뚱하게 튄 곡선)은 직선으로 바꾼다
+function sane(p, s) {
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  for (let i = 0; i < s.n; i++) {
+    if (s.xs[i] < x0) x0 = s.xs[i]; if (s.xs[i] > x1) x1 = s.xs[i];
+    if (s.ys[i] < y0) y0 = s.ys[i]; if (s.ys[i] > y1) y1 = s.ys[i];
+  }
+  // 곡선 핸들은 원호 바깥으로 조금 나가는 게 정상. 도형 크기에 비례한 여유를 준다
+  const m = Math.max(3, 0.5 * Math.max(x1 - x0, y1 - y0));
+  const ok = (x, y) => x >= x0 - m && x <= x1 + m && y >= y0 - m && y <= y1 + m;
+  const clamp = (x, y) => [Math.min(x1, Math.max(x0, x)), Math.min(y1, Math.max(y0, y))];
+  if (!ok(...p.start)) p.start = clamp(...p.start);
+  p.segs = p.segs.map((g) => {
+    let q = g;
+    if (!ok(g.x, g.y)) { const c = clamp(g.x, g.y); q = { ...g, x: c[0], y: c[1] }; }
+    if (q.t === 'C' && (!ok(q.x1, q.y1) || !ok(q.x2, q.y2) || q !== g)) return { t: 'L', x: q.x, y: q.y };
+    return q;
+  });
+  return p;
+}
+
 export function buildPath(s, o) {
   if (s.kind === 'circle') return { circle: s };
   if (s.kind === 'ellipse') return { ellipse: s };
@@ -628,7 +654,7 @@ export function buildPath(s, o) {
     const bounds = cuts.map((c) => ({ i: c.i, p: P(c.i), tf: c.tf }));
     bounds.push({ ...bounds[0], i: bounds[0].i + n });
     fitBounds(bounds, segs);
-    return { start: bounds[0].p, segs };
+    return sane({ start: bounds[0].p, segs }, s);
   }
 
   // 두 직선 사이를 정확한 원호(필렛)로 이을 수 있으면 그렇게 한다
@@ -664,6 +690,12 @@ export function buildPath(s, o) {
     if ((eB[0] - X[0]) * B.dx + (eB[1] - X[1]) * B.dy < d - 0.5) return null;
     const endA = [X[0] - A.dx * d, X[1] - A.dy * d];
     const startB = [X[0] + B.dx * d, X[1] + B.dy * d];
+    // 원호 접점이 실제 곡선 구간 근처여야 한다(먼 직선을 따라 크게 도는 원호 방지)
+    let gl = 0;
+    for (let k = 1; k < pts.length; k++) gl += Math.hypot(pts[k][0] - pts[k - 1][0], pts[k][1] - pts[k - 1][1]);
+    const lim = gl * 0.75 + 1.5;
+    if (Math.hypot(endA[0] - pts[0][0], endA[1] - pts[0][1]) > lim) return null;
+    if (Math.hypot(startB[0] - pts[pts.length - 1][0], startB[1] - pts[pts.length - 1][1]) > lim) return null;
     const segs = [];
     const arc = (p0, t0, p1, t1, ang) => {
       const k = (4 / 3) * Math.tan(ang / 4) * r;
@@ -725,5 +757,5 @@ export function buildPath(s, o) {
     segs.push({ t: 'L', x: joins[r].endA[0], y: joins[r].endA[1] });
     segs.push(...joins[r].segs);
   }
-  return { start, segs };
+  return sane({ start, segs }, s);
 }

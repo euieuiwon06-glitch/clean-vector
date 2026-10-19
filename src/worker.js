@@ -1,5 +1,5 @@
 // 변환은 워커에서: 화면이 멈추지 않게
-import { trace, toSVG } from './core/trace.js';
+import { convertAuto, toSVG } from './core/trace.js';
 import { traceOverlay } from './core/overlay.js';
 
 async function encode(w, h, rgba, type = 'image/png', quality) {
@@ -41,10 +41,11 @@ function collectAnchors(res) {
 }
 
 self.onmessage = async (e) => {
-  const { id, image, opts } = e.data;
+  const { id, image } = e.data;
+  const opts = { background: true, photoFormat: 'image/jpeg' };
   try {
     const progress = (label, p) => self.postMessage({ id, type: 'progress', label, p });
-    const res = (opts.mode === 'overlay' ? traceOverlay : trace)(image, opts, progress);
+    const res = await convertAuto(image, traceOverlay, progress);
     const hrefs = { photos: [], shades: [] };
     const { width: W, data } = image;
     for (const r of res.photos || []) {
@@ -63,7 +64,7 @@ self.onmessage = async (e) => {
     const { anchors, handles } = collectAnchors(res);
     self.postMessage({
       id, type: 'done', svg, anchors, handles,
-      info: { stats: res.stats, palette: res.palette, background: res.background, photos: res.photos || [], targets: res.targets || [], width: res.width, height: res.height },
+      info: { mode: res.mode, stats: res.stats, palette: res.palette, background: res.background, photos: res.photos || [], targets: res.targets || [], width: res.width, height: res.height },
     }, [anchors.buffer, handles.buffer]);
   } catch (err) {
     self.postMessage({ id, type: 'error', message: String(err && err.stack || err) });

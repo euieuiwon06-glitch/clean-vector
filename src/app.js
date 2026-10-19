@@ -1,40 +1,11 @@
-const DEF = {
-  mode: 'graphic', colorsMode: 'auto', colorsN: 5, photo: true, background: true,
-  shading: true, shadeStrength: 1,
-  lineTol: 0.6, snapDeg: 5, snap45: false, align: true, strokes: true,
-  cornerTol: 0.9, minFillet: 1.8, curveTol: 0.45,
-  blur: 0.5, minArea: 4, thin: true,
-};
-const STORE = 'clean-vector:settings';
 const $ = (s) => document.querySelector(s);
-
-let S = { ...DEF };
-try { Object.assign(S, JSON.parse(localStorage.getItem(STORE) || '{}')); } catch {}
-const save = () => { try { localStorage.setItem(STORE, JSON.stringify(S)); } catch {} };
 
 const stage = $('#stage'), world = $('#world'), orig = $('#orig'), vec = $('#vec'), outline = $('#outline');
 const cvs = $('#anchors'), wipe = $('#wipe');
-let image = null, fileName = 'vector', result = null, targets = [];
+let image = null, fileName = 'vector', result = null;
 let view = 'vec', Z = 1, TX = 0, TY = 0, wipeX = 0.5;
 
-// ---------- 패널 ----------
-document.querySelectorAll('.slider').forEach((el) => {
-  const k = el.dataset.key;
-  const input = Object.assign(document.createElement('input'), { type: 'range', min: el.dataset.min, max: el.dataset.max, step: el.dataset.step });
-  input.setAttribute('aria-label', el.querySelector('span').textContent);
-  const out = document.createElement('output');
-  el.append(out, input);
-  const show = () => { out.textContent = `${Number(S[k]).toString()}${el.dataset.unit || ''}`; };
-  input.value = S[k]; show();
-  input.addEventListener('input', () => { S[k] = Number(input.value); show(); save(); schedule(); });
-  el._sync = () => { input.value = S[k]; show(); };
-});
-document.querySelectorAll('.toggle input').forEach((el) => {
-  const k = el.dataset.key;
-  el.checked = !!S[k];
-  el.addEventListener('change', () => { S[k] = el.checked; save(); schedule(); });
-});
-function seg(id, key, onChange) {
+function seg(id, onChange) {
   const root = $(id);
   const set = (v) => root.querySelectorAll('button').forEach((b) => b.classList.toggle('on', b.dataset.v === v));
   root.addEventListener('click', (e) => {
@@ -43,22 +14,7 @@ function seg(id, key, onChange) {
   });
   return set;
 }
-const setMode = seg('#mode', 'mode', (v) => { S.mode = v; save(); applyModeUI(); schedule(); });
-const setColors = seg('#colorsMode', 'colorsMode', (v) => { S.colorsMode = v; save(); applyModeUI(); schedule(); });
-const setView = seg('#view', null, (v) => { view = v; applyView(); });
-function applyModeUI() {
-  setMode(S.mode); setColors(S.colorsMode);
-  document.querySelectorAll('[data-show]').forEach((el) => { el.hidden = el.dataset.show !== S.mode; });
-  document.querySelector('.slider[data-key="colorsN"]').hidden = S.colorsMode !== 'manual';
-  stage.classList.toggle('picking', S.mode === 'overlay' && !!image);
-}
-applyModeUI();
-$('#reset').addEventListener('click', () => {
-  S = { ...DEF, mode: S.mode }; save();
-  document.querySelectorAll('.slider').forEach((el) => el._sync());
-  document.querySelectorAll('.toggle input').forEach((el) => { el.checked = !!S[el.dataset.key]; });
-  applyModeUI(); schedule();
-});
+const setView = seg('#view', (v) => { view = v; applyView(); });
 
 // ---------- 변환 ----------
 let worker = null, busy = false, jobId = 0, timer = 0;
@@ -67,22 +23,13 @@ function makeWorker() {
   worker.onmessage = onWorker;
 }
 makeWorker();
-function schedule() { clearTimeout(timer); timer = setTimeout(run, 220); }
 function run() {
   if (!image) return;
   if (busy) { worker.terminate(); makeWorker(); }
   busy = true;
   const id = ++jobId;
-  const big = image.width * image.height > 3_500_000;
-  const opts = {
-    ...S,
-    colors: S.colorsMode === 'auto' ? 'auto' : S.colorsN,
-    targets: targets.map((t) => t.rgb),
-    scale: big ? 1 : 2,
-    photoFormat: 'image/jpeg',
-  };
   progress(0.02, '변환 중');
-  worker.postMessage({ id, image: { width: image.width, height: image.height, data: image.data }, opts });
+  worker.postMessage({ id, image: { width: image.width, height: image.height, data: image.data } });
 }
 function onWorker(e) {
   const m = e.data;
@@ -95,7 +42,7 @@ function onWorker(e) {
   vec.innerHTML = m.svg;
   outline.innerHTML = m.svg;
   outline.querySelectorAll('[id]').forEach((el) => el.removeAttribute('id'));
-  $('#save').disabled = $('#copy').disabled = false;
+  $('#save').disabled = false;
   renderInfo(m);
   layout();
 }
@@ -111,36 +58,7 @@ function renderInfo(m) {
   const st = m.info.stats;
   $('#stats').innerHTML = `<span>패스 <b>${st.paths.toLocaleString()}</b></span><span>앵커 <b>${st.anchors.toLocaleString()}</b></span>` +
     `<span>용량 <b>${kb >= 1024 ? (kb / 1024).toFixed(1) + 'MB' : Math.round(kb) + 'KB'}</b></span><span>${(st.ms / 1000).toFixed(1)}초</span>` +
-    (m.info.photos.length ? `<span>사진 영역 <b>${m.info.photos.length}</b></span>` : '');
-  const pal = $('#palette');
-  pal.innerHTML = '';
-  if (S.mode === 'graphic') {
-    const list = m.info.palette.filter((c) => c !== m.info.background);
-    if (m.info.background) list.unshift(m.info.background);
-    for (const c of list) pal.append(swatch(c, c === m.info.background ? '배경' : c.toUpperCase()));
-  }
-  renderTargets(m.info.targets);
-}
-function swatch(color, label, onRemove) {
-  const s = document.createElement('span');
-  s.className = 'sw';
-  s.innerHTML = `<i style="background:${color}"></i>${label}`;
-  if (onRemove) {
-    const b = Object.assign(document.createElement('button'), { textContent: '×', title: '빼기' });
-    b.setAttribute('aria-label', `${label} 빼기`);
-    b.onclick = onRemove;
-    s.append(b);
-  }
-  return s;
-}
-function renderTargets(auto) {
-  const box = $('#targets');
-  box.innerHTML = '';
-  if (targets.length) {
-    targets.forEach((t, i) => box.append(swatch(t.hex, t.hex.toUpperCase(), () => { targets.splice(i, 1); renderTargets(); schedule(); })));
-  } else if (auto && auto.length) {
-    auto.forEach((c) => box.append(swatch(c, `자동 ${c.toUpperCase()}`)));
-  }
+    (m.info.mode === 'overlay' ? '<span>사진 위 그래픽: 사진은 원본, 그래픽만 벡터</span>' : m.info.photos.length ? `<span>사진 영역 <b>${m.info.photos.length}</b>곳은 원본 유지</span>` : '');
 }
 
 // ---------- 파일 ----------
@@ -155,10 +73,8 @@ async function openFile(file) {
   if (orig.src) URL.revokeObjectURL(orig.src);
   orig.src = URL.createObjectURL(file);
   orig.hidden = false;
-  targets = [];
   result = null; vec.innerHTML = ''; outline.innerHTML = '';
   $('#drop').classList.add('hidden');
-  applyModeUI();
   fit();
   run();
 }
@@ -177,16 +93,6 @@ $('#save').addEventListener('click', () => {
   a.click();
   setTimeout(() => URL.revokeObjectURL(a.href), 1000);
 });
-$('#copy').addEventListener('click', async () => {
-  if (!result) return;
-  try { await navigator.clipboard.writeText(result.svg); flash('#copy', '복사됨'); } catch { flash('#copy', '복사 실패'); }
-});
-function flash(sel, text) {
-  const b = $(sel), t = b.textContent;
-  b.textContent = text;
-  setTimeout(() => { b.textContent = t; }, 1200);
-}
-
 // ---------- 보기: 확대·이동 ----------
 function fit() {
   if (!image) return;
@@ -295,22 +201,7 @@ stage.addEventListener('pointerup', (e) => {
   if (!drag) return;
   const d = drag; drag = null;
   stage.classList.remove('panning');
-  if (!d.moved && !d.wipe && S.mode === 'overlay') pick(e);
 });
-function pick(e) {
-  const r = stage.getBoundingClientRect();
-  const x = Math.floor((e.clientX - r.left - TX) / Z), y = Math.floor((e.clientY - r.top - TY) / Z);
-  if (x < 1 || y < 1 || x >= image.width - 1 || y >= image.height - 1) return;
-  const acc = [0, 0, 0];
-  for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
-    const i = ((y + dy) * image.width + x + dx) * 4;
-    acc[0] += image.data[i]; acc[1] += image.data[i + 1]; acc[2] += image.data[i + 2];
-  }
-  const rgb = acc.map((v) => Math.round(v / 9));
-  targets.push({ rgb, hex: '#' + rgb.map((v) => v.toString(16).padStart(2, '0')).join('') });
-  renderTargets();
-  schedule();
-}
 $('#zoomIn').addEventListener('click', () => { const r = stage.getBoundingClientRect(); zoomAt(1.25, r.width / 2, r.height / 2); });
 $('#zoomOut').addEventListener('click', () => { const r = stage.getBoundingClientRect(); zoomAt(0.8, r.width / 2, r.height / 2); });
 $('#zoomFit').addEventListener('click', fit);

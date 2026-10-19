@@ -25,39 +25,34 @@ export const DEFAULTS = {
 
 const hex = (c) => '#' + c.map((v) => v.toString(16).padStart(2, '0')).join('');
 
-// 대표색 혼합으로 설명되지 않는 넓은 영역 = 사진. 블록 단위로 찾아서 직사각형 영역으로 묶는다.
-function detectPhotos(img, um, o) {
-  const { width: w, height: h } = img;
-  const { label, resid } = um;
-  const I = new Int32Array((w + 1) * (h + 1));
-  for (let y = 0; y < h; y++) {
-    let row = 0;
-    for (let x = 0; x < w; x++) {
-      row += label[y * w + x] >= 0 ? 1 : 0;
-      I[(y + 1) * (w + 1) + x + 1] = I[y * (w + 1) + x + 1] + row;
-    }
-  }
-  const R = 3;
-  const coreNear = (x, y) => {
-    const x0 = Math.max(0, x - R), y0 = Math.max(0, y - R), x1 = Math.min(w, x + R + 1), y1 = Math.min(h, y + R + 1);
-    return I[y1 * (w + 1) + x1] - I[y0 * (w + 1) + x1] - I[y1 * (w + 1) + x0] + I[y0 * (w + 1) + x0];
-  };
+// 사진 블록: 완만한 색 변화(평평하지도, 또렷한 경계도 아닌 픽셀)가 절반 이상인 16px 블록.
+// 그래픽·선화는 평평한 면 + 또렷한 경계라 거의 0%, 사진·3D 렌더는 60% 이상이 된다.
+export function photoBlocks(img) {
+  const { width: w, height: h, data } = img;
   const B = 16, bw = Math.ceil(w / B), bh = Math.ceil(h / B);
-  const blk = new Uint8Array(bw * bh);
-  const thr = 0.55 - o.photoSens * 0.4;
-  for (let by = 0; by < bh; by++) {
-    for (let bx = 0; bx < bw; bx++) {
-      let cnt = 0, tot = 0;
-      for (let y = by * B; y < Math.min(h, by * B + B); y += 2) {
-        for (let x = bx * B; x < Math.min(w, bx * B + B); x += 2) {
-          tot++;
-          const i = y * w + x;
-          if ((label[i] < 0 && coreNear(x, y) === 0) || resid[i] > 40) cnt++;
-        }
+  const cnt = new Uint16Array(bw * bh), tot = new Uint16Array(bw * bh);
+  for (let y = 1; y < h - 1; y++) {
+    for (let x = 1; x < w - 1; x++) {
+      const i = (y * w + x) * 4;
+      let maxd = 0;
+      for (const o of [-4, 4, -w * 4, w * 4]) {
+        const d = Math.abs(data[i] - data[i + o]) + Math.abs(data[i + 1] - data[i + 1 + o]) + Math.abs(data[i + 2] - data[i + 2 + o]);
+        if (d > maxd) maxd = d;
       }
-      if (cnt / tot > thr) blk[by * bw + bx] = 1;
+      const b = ((y / B) | 0) * bw + ((x / B) | 0);
+      tot[b]++;
+      if (maxd >= 8 && maxd <= 48) cnt[b]++;
     }
   }
+  const blk = new Uint8Array(bw * bh);
+  let n = 0;
+  for (let b = 0; b < bw * bh; b++) if (tot[b] && cnt[b] / tot[b] > 0.5) { blk[b] = 1; n++; }
+  return { blk, bw, bh, B, coverage: n / (bw * bh) };
+}
+
+function detectPhotos(img, pb) {
+  const { width: w, height: h } = img;
+  const { blk, bw, bh, B } = pb;
   // 한 칸 팽창 후 연결 성분 → 경계 상자
   const dil = new Uint8Array(bw * bh);
   for (let y = 0; y < bh; y++) for (let x = 0; x < bw; x++) {
@@ -84,7 +79,7 @@ function detectPhotos(img, um, o) {
         if (dil[k] && !seen[k]) { seen[k] = 1; st.push(k); }
       }
     }
-    if (core >= 8) {
+    if (core >= Math.max(8, bw * bh * 0.01)) {
       rects.push({ x: x0 * B, y: y0 * B, w: Math.min(w, (x1 + 1) * B) - x0 * B, h: Math.min(h, (y1 + 1) * B) - y0 * B });
     }
   }
@@ -101,7 +96,7 @@ export function trace(input, opts = {}, progress = () => {}) {
   let um = unmix(img, palette);
   let photos = [];
   if (o.photo) {
-    photos = detectPhotos(img, um, o);
+    photos = detectPhotos(img, o.photoBlocks || photoBlocks(img));
     if (photos.length) {
       // 사진 영역을 빼고 대표색을 다시 뽑는다
       const bgc = palette[um.bg];
@@ -117,8 +112,35 @@ export function trace(input, opts = {}, progress = () => {}) {
   const { masks, bg, counts } = um;
   for (const r of photos) for (const m of masks) for (let y = r.y; y < r.y + r.h; y++) m.fill(0, y * w + r.x, y * w + r.x + r.w);
 
-  const order = palette.map((_, i) => i).filter((i) => i !== bg).sort((a, b) => counts[b] - counts[a]);
-  const v = vectorize(order.map((ci) => ({ color: hex(palette[ci]), mask: masks[ci] })), w, h, o, progress);
+  // 겹쳐 쌓기: 색 c가 배경→d 사이의 연한 색(틴트)이면, c 레이어는 "c만큼 이상 진한 d"까지 포함한다.
+  // 진하기가 들쭉날쭉한 선(회색↔검정)이나 연초록 띠 속 초록 점선이 한 레이어 안에서 끊기지 않고,
+  // 진한 d는 그 위에 그려진다.
+  const B0 = palette[bg];
+  const dist = (c) => Math.hypot(c[0] - B0[0], c[1] - B0[1], c[2] - B0[2]);
+  const order = palette.map((_, i) => i).filter((i) => i !== bg).sort((a, b) => dist(palette[a]) - dist(palette[b]));
+  const stacked = order.map((ci) => {
+    const pc = palette[ci];
+    const parents = [];
+    for (const d of order) {
+      if (d === ci) continue;
+      const pd = palette[d];
+      const vx = pd[0] - B0[0], vy = pd[1] - B0[1], vz = pd[2] - B0[2];
+      const vv = vx * vx + vy * vy + vz * vz;
+      const t = ((pc[0] - B0[0]) * vx + (pc[1] - B0[1]) * vy + (pc[2] - B0[2]) * vz) / vv;
+      if (t <= 0.08 || t >= 0.95) continue;
+      const r = Math.hypot(pc[0] - B0[0] - vx * t, pc[1] - B0[1] - vy * t, pc[2] - B0[2] - vz * t);
+      if (r < 30) parents.push({ m: masks[d] });
+    }
+    if (!parents.length) return { color: hex(pc), mask: masks[ci] };
+    const m = new Float32Array(masks[ci]);
+    for (let i = 0; i < m.length; i++) {
+      let v = m[i];
+      for (const p of parents) v += p.m[i]; // 진한 색의 경계는 그 색 레이어와 같게
+      m[i] = v > 1 ? 1 : v;
+    }
+    return { color: hex(pc), mask: m };
+  });
+  const v = vectorize(stacked, w, h, o, progress);
   progress('완료', 1);
   return {
     mode: 'graphic',
@@ -127,6 +149,16 @@ export function trace(input, opts = {}, progress = () => {}) {
     layers: v.layers, photos,
     stats: { ...v.stats, ms: Date.now() - t0 },
   };
+}
+
+// 설정 없이 자동 변환: 사진이 대부분이면 "사진 위 그래픽", 아니면 그래픽 전체(사진 영역은 원본 유지)
+export async function convertAuto(input, traceOverlay, progress = () => {}) {
+  const img = compositeOnWhite(input);
+  const pb = photoBlocks(img);
+  const big = input.width * input.height > 3_500_000;
+  const base = { scale: big ? 1 : 2, photoBlocks: pb };
+  if (pb.coverage > 0.45) return traceOverlay(input, base, progress);
+  return trace(input, base, progress);
 }
 
 // 색별 마스크 → 정리된 패스 레이어
