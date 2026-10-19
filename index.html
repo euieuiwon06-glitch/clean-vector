@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Clean Vector</title>
+  <meta name="description" content="PNG를 깨끗한 패스의 SVG로. 수평·수직 직선, 정확한 코너와 원호, 매끈한 곡선." />
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23111'/%3E%3Cpath d='M8 23V9h7a7 7 0 0 1 0 14' fill='none' stroke='%23fff' stroke-width='3'/%3E%3Ccircle cx='8' cy='23' r='2.6' fill='%2330d158'/%3E%3C/svg%3E" />
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/variable/pretendardvariable-dynamic-subset.min.css" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header class="bar">
+    <div class="brand">
+      <svg viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="8" /><path d="M8 23V9h7a7 7 0 0 1 0 14" /><circle cx="8" cy="23" r="2.6" /></svg>
+      <span>Clean Vector</span>
+    </div>
+    <div class="bar-actions">
+      <label class="btn ghost" for="file">이미지 열기<input id="file" type="file" accept="image/png,image/jpeg,image/webp" hidden /></label>
+      <button class="btn ghost" id="copy" disabled>SVG 복사</button>
+      <button class="btn primary" id="save" disabled>SVG 저장</button>
+    </div>
+  </header>
+
+  <main class="layout">
+    <aside class="panel" id="panel">
+      <section>
+        <h2>모드</h2>
+        <div class="seg" id="mode">
+          <button data-v="graphic" class="on">그래픽 전체</button>
+          <button data-v="overlay">사진 위 그래픽</button>
+        </div>
+        <p class="hint" data-show="graphic">로고·아이콘·텍스트·플랫 일러스트. 사진 영역이 섞여 있으면 그 부분은 원본 이미지로 둡니다.</p>
+        <p class="hint" data-show="overlay">사진에 합성된 색 그래픽만 벡터로 바꾸고, 그림자·반사광은 원본에서 뽑아 위에 얹습니다.</p>
+      </section>
+
+      <section data-show="graphic">
+        <h2>색</h2>
+        <div class="row">
+          <span>색 개수</span>
+          <div class="seg small" id="colorsMode">
+            <button data-v="auto" class="on">자동</button>
+            <button data-v="manual">직접</button>
+          </div>
+        </div>
+        <div class="slider" data-key="colorsN" data-min="2" data-max="12" data-step="1" hidden><span>개수</span></div>
+        <div class="swatches" id="palette"></div>
+        <label class="toggle"><input type="checkbox" data-key="photo" /><span>사진 영역은 원본 그대로</span></label>
+        <label class="toggle"><input type="checkbox" data-key="background" /><span>배경색 포함</span></label>
+      </section>
+
+      <section data-show="overlay">
+        <h2>대상 색</h2>
+        <p class="hint">결과 화면에서 그래픽을 클릭하면 색이 추가됩니다. 비워두면 자동으로 찾습니다.</p>
+        <div class="swatches" id="targets"></div>
+        <label class="toggle"><input type="checkbox" data-key="shading" /><span>그림자·반사광 입히기</span></label>
+        <div class="slider" data-key="shadeStrength" data-min="0" data-max="1" data-step="0.05"><span>그림자 강도</span></div>
+      </section>
+
+      <section>
+        <h2>직선</h2>
+        <div class="slider" data-key="lineTol" data-min="0.2" data-max="2" data-step="0.05" data-unit="px"><span>직선 허용 오차</span></div>
+        <div class="slider" data-key="snapDeg" data-min="0" data-max="15" data-step="0.5" data-unit="°"><span>수평·수직 고정 범위</span></div>
+        <label class="toggle"><input type="checkbox" data-key="snap45" /><span>45° 방향도 고정</span></label>
+        <label class="toggle"><input type="checkbox" data-key="align" /><span>같은 줄에 있는 선 위치 맞춤</span></label>
+        <label class="toggle"><input type="checkbox" data-key="strokes" /><span>획 두께 고르게 (텍스트)</span></label>
+      </section>
+
+      <section>
+        <h2>코너 · 곡선</h2>
+        <div class="slider" data-key="cornerTol" data-min="0.3" data-max="3" data-step="0.05" data-unit="px"><span>코너 복원 범위</span></div>
+        <div class="slider" data-key="minFillet" data-min="0" data-max="6" data-step="0.1" data-unit="px"><span>둥근 모서리 최소 반지름</span></div>
+        <div class="slider" data-key="curveTol" data-min="0.15" data-max="2" data-step="0.05" data-unit="px"><span>곡선 허용 오차</span></div>
+      </section>
+
+      <section>
+        <h2>정리</h2>
+        <div class="slider" data-key="blur" data-min="0" data-max="2" data-step="0.05" data-unit="px"><span>가장자리 잡음 정리</span></div>
+        <div class="slider" data-key="minArea" data-min="0" data-max="80" data-step="1" data-unit="px²"><span>작은 조각 제거</span></div>
+        <label class="toggle"><input type="checkbox" data-key="thin" /><span>얇은 획 보존</span></label>
+      </section>
+
+      <button class="btn ghost wide" id="reset">기본값으로</button>
+    </aside>
+
+    <section class="stage-wrap">
+      <div class="viewbar">
+        <div class="seg" id="view">
+          <button data-v="orig">원본</button>
+          <button data-v="vec" class="on">결과</button>
+          <button data-v="wipe">비교</button>
+          <button data-v="path">패스</button>
+        </div>
+        <div class="status" id="status"></div>
+      </div>
+      <div class="stage" id="stage">
+        <div class="world" id="world">
+          <img id="orig" alt="원본 이미지" draggable="false" hidden />
+          <div id="vec"></div>
+          <div id="outline"></div>
+        </div>
+        <canvas id="anchors"></canvas>
+        <div class="wipe" id="wipe" hidden><span></span></div>
+        <div class="drop" id="drop">
+          <div>
+            <strong>PNG를 끌어다 놓으세요</strong>
+            <span>또는 붙여넣기(Ctrl+V) · 이미지 열기</span>
+          </div>
+        </div>
+        <div class="progress" id="progress"><i></i></div>
+      </div>
+      <div class="footbar">
+        <div class="stats" id="stats"></div>
+        <div class="zoom">
+          <button class="icon" id="zoomOut" aria-label="축소">−</button>
+          <button class="zv" id="zoomFit" title="화면에 맞춤">100%</button>
+          <button class="icon" id="zoomIn" aria-label="확대">+</button>
+        </div>
+      </div>
+    </section>
+  </main>
+  <script type="module" src="src/app.js"></script>
+</body>
+</html>
