@@ -1,7 +1,7 @@
-import { compositeOnWhite, buildPalette, unmix, denoise } from './palette.js?v=02bfda52';
-import { extractStrokes, inkCoverage } from './strokes.js?v=02bfda52';
-import { maskBounds, upsample, gaussianBlur, preserveThin, marchingSquares } from './contour.js?v=02bfda52';
-import { resampleClosed, analyzeContour, alignRuns, equalizeStrokes, buildPath } from './fit.js?v=02bfda52';
+import { compositeOnWhite, buildPalette, unmix, denoise } from './palette.js?v=afd93cf8';
+import { extractStrokes, inkCoverage } from './strokes.js?v=afd93cf8';
+import { maskBounds, upsample, gaussianBlur, preserveThin, marchingSquares } from './contour.js?v=afd93cf8';
+import { resampleClosed, analyzeContour, alignRuns, equalizeStrokes, buildPath } from './fit.js?v=afd93cf8';
 
 export const DEFAULTS = {
   colors: 'auto',   // 대표색 개수(숫자 또는 auto)
@@ -224,15 +224,15 @@ export function trace(input, opts = {}, progress = () => {}) {
     // 선 아래로 색 면을 이어 칠한다: 선을 빼도 초록 면에 구멍(흰 테두리)이 남지 않게
     fillUnderInk(stacked.filter((it) => !it.ink), cov, w, h);
     if (o.debugCov) o.debugCov(cov);
-    const r = extractStrokes(cov, w, h, { lineTol: 0.75, snapDeg: 3.5, binTh: 0.4 });
+    const r = extractStrokes(cov, w, h, { lineTol: 0.75, snapDeg: 3.5, binTh: 0.2 });
     const bc = palette[bg], ic = ink.rgb;
     // 색은 검정·회색 두 가지, 굵기는 길이 가중 2~3단계로 통일
     const gray = hex(ic.map((v, k) => Math.round(bc[k] + (v - bc[k]) * 0.5)));
     // 흐림 때문에 재는 폭이 실제보다 굵게 나와 0.8배로 보정
-    for (const st of r.strokes) st.width *= 0.8;
-    const levels = widthLevels(r.strokes);
+    for (const st of r.strokes) if (!st.fixedWidth) st.width *= 0.8;
+    const levels = widthLevels(r.strokes.filter((st) => !st.fixedWidth));
     strokes = r.strokes.map((st) => {
-      const wq = levels.reduce((a, b) => (Math.abs(b - st.width) < Math.abs(a - st.width) ? b : a));
+      const wq = st.fixedWidth ? Math.round(st.width * 4) / 4 : levels.reduce((a, b) => (Math.abs(b - st.width) < Math.abs(a - st.width) ? b : a));
       return { ...st, color: st.peak >= 0.5 ? ink.color : gray, width: wq };
     });
     stacked[inkIdx] = { ...ink, mask: r.fillMask };
@@ -354,14 +354,14 @@ export function toSVG(res, { background = true, hrefs = {} } = {}) {
   if (res.strokes?.length) {
     const groups = new Map();
     for (const st of res.strokes) {
-      const k = `${st.color}|${st.width}`;
+      const k = `${st.color}|${st.width}|${st.cap || 'round'}`;
       if (!groups.has(k)) groups.set(k, []);
       groups.get(k).push(openPathData(st));
     }
     out.push('<g id="lines" fill="none" stroke-linecap="round" stroke-linejoin="round">');
     for (const [k, ds] of groups) {
-      const [c, wd] = k.split('|');
-      out.push(`<path stroke="${c}" stroke-width="${wd}" d="${ds.join('')}"/>`);
+      const [c, wd, cap] = k.split('|');
+      out.push(`<path stroke="${c}" stroke-width="${wd}"${cap === 'butt' ? ' stroke-linecap="butt"' : ''} d="${ds.join('')}"/>`);
     }
     out.push('</g>');
   }

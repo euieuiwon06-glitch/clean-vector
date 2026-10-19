@@ -3,7 +3,7 @@
 // 2) 뼈대를 끝점·교차점 사이 선들로 나눠
 // 3) 직선은 그림의 주요 방향으로 정렬한 선분, 곡선은 매끈한 베지어로 맞추고
 // 4) 선마다 원본 단면에서 굵기·진하기를 재서 일정한 굵기의 획으로 만든다.
-import { fitCubic } from './fit.js?v=02bfda52';
+import { fitCubic } from './fit.js?v=afd93cf8';
 
 const DEG = Math.PI / 180;
 
@@ -329,6 +329,77 @@ function extendEnds(paths, maxExt) {
   });
 }
 
+// 덩어리 하나를 곧은 막대로 맞춰 본다(덮임 무게 주축). 길이 ≥ 폭×3, 축에서 벗어남이 작으면 막대.
+function fitDash(px, m, w, h) {
+  // 가장자리 반투명 픽셀까지 포함
+  const set = new Set(px);
+  for (const c of px) { const x = c % w, y = (c / w) | 0; for (const [dx, dy] of N8) { const xx = x + dx, yy = y + dy; if (xx >= 0 && yy >= 0 && xx < w && yy < h && m[yy * w + xx] > 0.05) set.add(yy * w + xx); } }
+  let sw = 0, mx = 0, my = 0;
+  for (const c of set) { const v = m[c]; sw += v; mx += v * ((c % w) + 0.5); my += v * (((c / w) | 0) + 0.5); }
+  if (sw < 1) return null;
+  mx /= sw; my /= sw;
+  let sxx = 0, syy = 0, sxy = 0;
+  for (const c of set) { const v = m[c], dx = (c % w) + 0.5 - mx, dy = ((c / w) | 0) + 0.5 - my; sxx += v * dx * dx; syy += v * dy * dy; sxy += v * dx * dy; }
+  const th = 0.5 * Math.atan2(2 * sxy, sxx - syy), ux = Math.cos(th), uy = Math.sin(th);
+  // 길이: 축 방향 분산으로(균일 막대면 길이² / 12), 폭 = 잉크 양 / 길이
+  const vu = (sxx * ux * ux + 2 * sxy * ux * uy + syy * uy * uy) / sw, vv = (sxx * uy * uy - 2 * sxy * ux * uy + syy * ux * ux) / sw;
+  const len = Math.sqrt(Math.max(0, 12 * vu - 1)), wid = sw / Math.max(1, len);
+  if (len < 3 || len < wid * 3 || wid > 3.2) return null;
+  if (Math.sqrt(vv) > wid * 0.45 + 0.35) return null; // 휘었거나 덩어리
+  // 가지(ㅏ의 짧은 획 등)가 있으면 막대가 아니다: 진한 픽셀이 모두 축 가까이에 있어야
+  for (const c of set) {
+    if (m[c] < 0.4) continue;
+    const dx = (c % w) + 0.5 - mx, dy = ((c / w) | 0) + 0.5 - my;
+    if (Math.abs(dx * -uy + dy * ux) > wid / 2 + 0.9) return null;
+  }
+  return { cx: mx, cy: my, ux, uy, len, width: wid };
+}
+
+// 선 끝 펴기: 끝 2.5px 안에서 안쪽 직선(끝에서 2~8px 구간)을 벗어나 굽은 점은 그 직선 위로 옮긴다.
+// 교차점 근처에서 뼈대가 휘는 현상 때문에 T자·모서리가 둥글게 나오는 것을 막는다.
+function straightenEnds(p) {
+  if (p.length < 10) return p;
+  const q = p.slice();
+  for (const st of [true, false]) {
+    const idx = (k) => (st ? k : q.length - 1 - k);
+    const a = 3, b = Math.min(10, q.length - 1);
+    let mx = 0, my = 0;
+    for (let k = a; k <= b; k++) { mx += q[idx(k)][0]; my += q[idx(k)][1]; }
+    const n = b - a + 1; mx /= n; my /= n;
+    let sxx = 0, syy = 0, sxy = 0, maxr = 0;
+    for (let k = a; k <= b; k++) { const dx = q[idx(k)][0] - mx, dy = q[idx(k)][1] - my; sxx += dx * dx; syy += dy * dy; sxy += dx * dy; }
+    const th = 0.5 * Math.atan2(2 * sxy, sxx - syy), ux = Math.cos(th), uy = Math.sin(th);
+    for (let k = a; k <= b; k++) maxr = Math.max(maxr, Math.abs((q[idx(k)][0] - mx) * -uy + (q[idx(k)][1] - my) * ux));
+    if (maxr > 0.35) continue; // 안쪽이 직선이 아니면(곡선) 그대로
+    for (let k = 0; k < a; k++) {
+      const pt = q[idx(k)], t = (pt[0] - mx) * ux + (pt[1] - my) * uy;
+      q[idx(k)] = [mx + ux * t, my + uy * t];
+    }
+  }
+  return q;
+}
+
+// 꺾이는 점(코너) 찾기: 앞뒤 ~2.5px 방향 차이가 크고 그 주변에서 가장 큰 곳
+function findCorners(p) {
+  const n = p.length, out = [];
+  if (n < 11) return out;
+  const turn = (i, k) => {
+    if (i - k < 0 || i + k >= n) return 0;
+    const ax = p[i][0] - p[i - k][0], ay = p[i][1] - p[i - k][1], bx = p[i + k][0] - p[i][0], by = p[i + k][1] - p[i][1];
+    return Math.abs(Math.atan2(ax * by - ay * bx, ax * bx + ay * by));
+  };
+  const big = new Float64Array(n), small = new Float64Array(n);
+  for (let i = 5; i < n - 5; i++) { big[i] = turn(i, 5); small[i] = turn(i, 2); }
+  for (let i = 5; i < n - 5; i++) {
+    // 진짜 코너: 넓게 봐도 좁게 봐도 비슷하게 꺾임. 둥근 모서리(원호)는 좁게 보면 조금만 꺾임
+    if (big[i] < 38 * DEG || small[i] < big[i] * 0.62) continue;
+    let mx = true;
+    for (let j = Math.max(5, i - 4); j <= Math.min(n - 6, i + 4); j++) if (big[j] > big[i] || (big[j] === big[i] && j < i)) { mx = false; break; }
+    if (mx) out.push(i);
+  }
+  return out;
+}
+
 function smoothPts(p, it = 2) {
   let q = p;
   for (let k = 0; k < it; k++) {
@@ -439,8 +510,11 @@ export function inkCoverage(img, ink) {
 export function extractStrokes(m, w, h, o = {}) {
   const maxHalf = o.maxHalf ?? 2.2; // 이보다 두꺼운 곳은 면으로 둔다
   const B = new Uint8Array(w * h);
-  for (let i = 0; i < w * h; i++) B[i] = m[i] >= (o.binTh ?? 0.3) ? 1 : 0;
-  const D = distance(B, w, h);
+  for (let i = 0; i < w * h; i++) B[i] = m[i] >= (o.binTh ?? 0.2) ? 1 : 0;
+  // 두꺼운 면 판정은 진한 부분만으로(흐린 선이 뭉쳐 면으로 잡히지 않게)
+  const BT = new Uint8Array(w * h);
+  for (let i = 0; i < w * h; i++) BT[i] = m[i] >= 0.45 ? 1 : 0;
+  const D = distance(BT, w, h);
   // 두꺼운 핵 → 원래 크기로 되돌린 영역 = 면
   const core = new Uint8Array(w * h);
   for (let i = 0; i < w * h; i++) core[i] = D[i] > maxHalf ? 1 : 0;
@@ -478,6 +552,7 @@ export function extractStrokes(m, w, h, o = {}) {
   // 글자·점·두꺼운 도형은 면으로 둔다.
   const comp = new Int32Array(w * h).fill(-1);
   const asStroke = [];
+  const dashes = [], isDash = [];
   {
     let id = 0;
     const st = [];
@@ -485,9 +560,11 @@ export function extractStrokes(m, w, h, o = {}) {
       if (!B[s0] || comp[s0] >= 0) continue;
       st.push(s0); comp[s0] = id;
       let x0 = w, y0 = h, x1 = 0, y1 = 0, area = 0, thickArea = 0;
+      const px = [];
       while (st.length) {
         const c = st.pop(), cx = c % w, cy = (c / w) | 0;
         area++; if (thick[c]) thickArea++;
+        if (px.length < 400) px.push(c);
         if (cx < x0) x0 = cx; if (cx > x1) x1 = cx; if (cy < y0) y0 = cy; if (cy > y1) y1 = cy;
         for (const [dx, dy] of N8) {
           const xx = cx + dx, yy = cy + dy;
@@ -497,6 +574,12 @@ export function extractStrokes(m, w, h, o = {}) {
         }
       }
       asStroke.push(Math.max(x1 - x0, y1 - y0) >= (o.minNet ?? 40) && thickArea < area * 0.35);
+      // 점선 조각·짧은 막대: 곧고 가는 작은 덩어리 → 끝이 각진 직선 하나
+      const md = Math.max(x1 - x0, y1 - y0) + 1;
+      let dash = null;
+      if (!asStroke[id] && md >= 4 && md <= 30 && px.length < 400) dash = fitDash(px, m, w, h);
+      isDash.push(!!dash);
+      if (dash) dashes.push(dash);
       id++;
     }
   }
@@ -520,14 +603,14 @@ export function extractStrokes(m, w, h, o = {}) {
   const RG = new Uint8Array(W3 * H3);
   for (let Y = 2; Y < H3 - 2; Y++) for (let X = 2; X < W3 - 2; X++) {
     const i = Y * W3 + X;
-    if (G[i] < 0.22) continue;
+    if (G[i] < 0.14) continue;
     if (!thinB[((Y / U) | 0) * w + ((X / U) | 0)] && !thinB[(Math.round(Y / U - 0.5)) * w + Math.round(X / U - 0.5)]) continue;
     const gxx = G[i - 1] - 2 * G[i] + G[i + 1], gyy = G[i - W3] - 2 * G[i] + G[i + W3];
     const gxy = (G[i - W3 - 1] + G[i + W3 + 1] - G[i - W3 + 1] - G[i + W3 - 1]) / 4;
     // 가장 크게 휘는 방향(선을 가로지르는 방향)
     const tr2 = (gxx + gyy) / 2, det = Math.sqrt(((gxx - gyy) / 2) ** 2 + gxy * gxy);
     const l1 = tr2 - det; // 더 음수인 고유값
-    if (l1 > -0.002) continue;
+    if (l1 > -0.0012) continue;
     let nx = gxy, ny = l1 - gxx;
     if (Math.abs(nx) + Math.abs(ny) < 1e-9) { nx = l1 - gyy; ny = gxy; }
     const nl = Math.hypot(nx, ny) || 1; nx /= nl; ny /= nl;
@@ -543,39 +626,48 @@ export function extractStrokes(m, w, h, o = {}) {
   paths = paths.map((p) => p.filter((_, k) => k % U === 0 || k === p.length - 1));
   paths = bridgeGaps(paths, 2.5);
   paths = bridgeGaps(paths, 9, (x, y) => sample(m, w, h, x, y));
-  paths = extendEnds(paths, 3);
+  paths = paths.map(straightenEnds);
+  paths = extendEnds(paths, 3.5);
 
-  // 1차: 선분 나누기
+  // 1차: 코너에서 조각으로 나누고, 조각마다 다듬은 뒤 선분으로 나눈다(코너는 다듬지 않아 둥글어지지 않음)
   const items = [];
   for (const raw of paths) {
-    const p = smoothPts(raw, 2);
-    const idx = rdp(p, o.lineTol ?? 0.75);
-    const segs = [];
-    for (let k = 0; k < idx.length - 1; k++) {
-      const a = idx[k], b = idx[k + 1];
-      const L = fitLine(p, a, b);
-      const len = Math.hypot(p[b][0] - p[a][0], p[b][1] - p[a][1]);
-      segs.push({ a, b, ...L, len });
+    const cs = findCorners(raw);
+    const bounds = [0, ...cs, raw.length - 1];
+    const pieces = [];
+    for (let k = 0; k < bounds.length - 1; k++) {
+      const pc = smoothPts(raw.slice(bounds[k], bounds[k + 1] + 1), 2);
+      if (pc.length < 2) continue;
+      const idx = rdp(pc, o.lineTol ?? 0.75);
+      const segs = [];
+      for (let j = 0; j < idx.length - 1; j++) {
+        const a = idx[j], b = idx[j + 1];
+        const L = fitLine(pc, a, b);
+        const len = Math.hypot(pc[b][0] - pc[a][0], pc[b][1] - pc[a][1]);
+        // 진행 방향으로 맞춤
+        if ((pc[b][0] - pc[a][0]) * L.dx + (pc[b][1] - pc[a][1]) * L.dy < 0) { L.dx = -L.dx; L.dy = -L.dy; }
+        segs.push({ a, b, ...L, len });
+      }
+      pieces.push({ p: pc, segs });
     }
-    items.push({ p, segs });
+    items.push({ p: raw, pieces });
   }
-  const doms = dominantAngles(items.flatMap((it) => it.segs.filter((s) => s.len >= 6)));
+  const doms = dominantAngles(items.flatMap((it) => it.pieces.flatMap((pc) => pc.segs.filter((s) => s.len >= 6))));
+  const snap = (s) => {
+    let ang = Math.atan2(s.dy, s.dx);
+    for (const d of doms) for (const base of [d, d + Math.PI, d - Math.PI, d - 2 * Math.PI]) {
+      if (Math.abs(ang - base) < (o.snapDeg ?? 3.5) * DEG) return { ...s, dx: Math.cos(base), dy: Math.sin(base) };
+    }
+    return s;
+  };
+  const proj = (s, pt) => { const t = (pt[0] - s.mx) * s.dx + (pt[1] - s.my) * s.dy; return [s.mx + s.dx * t, s.my + s.dy * t]; };
 
   const strokes = [];
-  for (const { p, segs } of items) {
+  for (const { p, pieces } of items) {
+    if (!pieces.length) continue;
     let total = 0;
-    for (const s of segs) total += s.len;
+    for (const pc of pieces) for (const sg of pc.segs) total += sg.len;
     if (total < 1.2) continue;
-    // 곡선 판정: 짧은 조각이 많고 꺾임이 고르면 곡선
-    // 꺾임이 모두 완만하면(다각형으로 근사된 매끈한 곡선) 곡선
-    const turns = [];
-    for (let k = 0; k < segs.length - 1; k++) {
-      const A = segs[k], Bs = segs[k + 1];
-      const ax = p[A.b][0] - p[A.a][0], ay = p[A.b][1] - p[A.a][1], bx = p[Bs.b][0] - p[Bs.a][0], by = p[Bs.b][1] - p[Bs.a][1];
-      turns.push(Math.abs(Math.atan2(ax * by - ay * bx, ax * bx + ay * by)));
-    }
-    const shortCnt = segs.filter((s) => s.len < 5).length;
-    const curvy = segs.length >= 3 && (shortCnt / segs.length > 0.5 || Math.max(...turns) < 32 * DEG);
     // 굵기·진하기: 법선 방향 단면
     let wsum = 0, psum = 0, cnt = 0;
     const ws = [];
@@ -609,51 +701,92 @@ export function extractStrokes(m, w, h, o = {}) {
     // 굵기 = 단면 폭의 중앙값(교차점·옆 선 때문에 튀는 값 무시)
     ws.sort((a, b) => a - b);
     const width = Math.max(0.6, Math.min(maxHalf * 2, ws.length ? ws[ws.length >> 1] : 1));
-    if (curvy) {
-      const q = smoothPts(p, 3);
-      const out = [];
-      const n = q.length - 1;
-      const t1 = norm2(q[Math.min(2, n)][0] - q[0][0], q[Math.min(2, n)][1] - q[0][1]);
-      const t2 = norm2(q[Math.max(0, n - 2)][0] - q[n][0], q[Math.max(0, n - 2)][1] - q[n][1]);
-      fitCubic(q, t1, t2, o.curveTol ?? 0.6, out);
-      strokes.push({ start: q[0], segs: out, width, peak, closed: dist2(q[0], q[n]) < 0.5 });
-      continue;
-    }
-    // 직선: 각도 정렬 후 인접 선분 교점으로 연결
-    const L = segs.map((s) => {
-      let ang = Math.atan2(s.dy, s.dx);
-      for (const d of doms) {
-        for (const base of [d, d + Math.PI, d - Math.PI]) {
-          if (Math.abs(ang - base) < (o.snapDeg ?? 3.5) * DEG) { ang = base; break; }
+    // 조각별 판정: 꺾임이 모두 완만하고 짧은 조각이 많으면 곡선, 아니면 직선(주요 방향으로 정렬)
+    const parts = pieces.map(({ p: pc, segs }) => {
+      const turns = [];
+      for (let k = 0; k < segs.length - 1; k++) {
+        const A = segs[k], Bs = segs[k + 1];
+        turns.push(Math.abs(Math.atan2(A.dx * Bs.dy - A.dy * Bs.dx, A.dx * Bs.dx + A.dy * Bs.dy)));
+      }
+      const shortCnt = segs.filter((sg) => sg.len < 5).length;
+      const curvy = segs.length >= 3 && (shortCnt / segs.length > 0.5 || Math.max(...turns) < 25 * DEG);
+      if (curvy) return { curvy, p: pc };
+      const L = segs.map(snap);
+      for (let k = L.length - 2; k >= 0; k--) {
+        const A = L[k], Bq = L[k + 1];
+        const same = Math.abs(A.dx * Bq.dy - A.dy * Bq.dx) < Math.sin(1.5 * DEG) && A.dx * Bq.dx + A.dy * Bq.dy > 0;
+        const off = Math.abs((Bq.mx - A.mx) * -A.dy + (Bq.my - A.my) * A.dx);
+        if (same && off < 0.8) {
+          const len = A.len + Bq.len;
+          L.splice(k, 2, { ...A, b: Bq.b, mx: (A.mx * A.len + Bq.mx * Bq.len) / len, my: (A.my * A.len + Bq.my * Bq.len) / len, len });
         }
       }
-      return { ...s, dx: Math.cos(ang), dy: Math.sin(ang) };
+      return { curvy, p: pc, L };
     });
-    // 같은 각도로 정렬되고 거의 같은 선 위의 이웃 선분은 합친다
-    for (let k = L.length - 2; k >= 0; k--) {
-      const A = L[k], Bq = L[k + 1];
-      const same = Math.abs(A.dx * Bq.dy - A.dy * Bq.dx) < Math.sin(1.5 * DEG) && A.dx * Bq.dx + A.dy * Bq.dy > 0;
-      const off = Math.abs((Bq.mx - A.mx) * -A.dy + (Bq.my - A.my) * A.dx);
-      if (same && off < 0.8) {
-        const len = A.len + Bq.len;
-        L.splice(k, 2, { ...A, b: Bq.b, mx: (A.mx * A.len + Bq.mx * Bq.len) / len, my: (A.my * A.len + Bq.my * Bq.len) / len, len });
+    // 이어 붙이기: 직선끼리 만나는 곳은 두 직선의 교점(날카로운 코너)
+    const out = [];
+    let start = null, cur = null;
+    const lineTo = (pt) => { if (!start) { start = pt; cur = pt; return; } if (dist2(cur, pt) > 1e-3) out.push({ t: 'L', x: pt[0], y: pt[1] }); cur = pt; };
+    parts.forEach((pt, k) => {
+      const prev = parts[k - 1], next = parts[k + 1];
+      if (pt.curvy) {
+        const q = smoothPts(pt.p, 2);
+        if (start) q[0] = cur; else { start = q[0]; cur = q[0]; }
+        const n = q.length - 1;
+        const t1 = norm2(q[Math.min(2, n)][0] - q[0][0], q[Math.min(2, n)][1] - q[0][1]);
+        const t2 = norm2(q[Math.max(0, n - 2)][0] - q[n][0], q[Math.max(0, n - 2)][1] - q[n][1]);
+        if (n >= 2) fitCubic(q, t1, t2, o.curveTol ?? 0.6, out); else out.push({ t: 'L', x: q[n][0], y: q[n][1] });
+        cur = q[n];
+        return;
       }
-    }
-    const proj = (s, pt) => { const t = (pt[0] - s.mx) * s.dx + (pt[1] - s.my) * s.dy; return [s.mx + s.dx * t, s.my + s.dy * t]; };
-    const pts = [proj(L[0], p[L[0].a])];
-    for (let k = 0; k < L.length - 1; k++) {
-      const X = intersect(L[k], L[k + 1]);
-      const e = p[L[k].b];
-      if (X && Math.hypot(X[0] - e[0], X[1] - e[1]) < 3) pts.push(X);
-      else { pts.push(proj(L[k], e)); pts.push(proj(L[k + 1], e)); }
-    }
-    pts.push(proj(L[L.length - 1], p[L[L.length - 1].b]));
-    strokes.push({ start: pts[0], segs: pts.slice(1).map(([x, y]) => ({ t: 'L', x, y })), width, peak, closed: false });
+      const L = pt.L, P = pt.p;
+      // 시작점: 앞 조각이 직선이면 교점, 아니면 투영
+      if (!start) lineTo(proj(L[0], P[L[0].a]));
+      else if (prev && !prev.curvy) { /* 교점은 앞 조각 끝에서 이미 찍음 */ }
+      else lineTo(proj(L[0], cur));
+      for (let j = 0; j < L.length - 1; j++) {
+        // 둥근 모서리: 긴 직선 사이에 낀 짧은 조각들(합쳐 14px 미만) → 두 직선에 접하는 원호
+        let t = j + 1, shortLen = 0;
+        while (t < L.length && L[t].len < 7 && shortLen + L[t].len < 14) { shortLen += L[t].len; t++; }
+        const G2 = L[t];
+        if (t > j + 1 && G2 && L[j].len >= 6 && G2.len >= 6) {
+          const turnAll = Math.abs(Math.atan2(L[j].dx * G2.dy - L[j].dy * G2.dx, L[j].dx * G2.dx + L[j].dy * G2.dy));
+          const X = intersect(L[j], G2);
+          if (turnAll > 50 * DEG && turnAll < 150 * DEG && X) {
+            const p1 = proj(L[j], P[L[j + 1].a]), p2 = proj(G2, P[L[t - 1].b]);
+            const d = (dist2(X, p1) + dist2(X, p2)) / 2;
+            // 원래 점들이 꼭짓점 가까이를 지나가면 각진 모서리(흐림 때문에 생긴 짧은 조각일 뿐)
+            let dmin = Infinity;
+            for (let q = L[j + 1].a; q <= L[t - 1].b; q++) dmin = Math.min(dmin, dist2(P[q], X));
+            if (dmin < 1.1) { lineTo(X); cur = X; j = t - 1; continue; }
+            if (d < 8) {
+              const a1 = [X[0] - L[j].dx * d, X[1] - L[j].dy * d], a2 = [X[0] + G2.dx * d, X[1] + G2.dy * d];
+              // 원호 근사 핸들 길이: r·(4/3)·tan(θ/4), r = d / tan(θ/2)
+              const r = d / Math.tan(turnAll / 2), k2 = (4 / 3) * Math.tan(turnAll / 4) * r;
+              lineTo(a1);
+              out.push({ t: 'C', x1: a1[0] + L[j].dx * k2, y1: a1[1] + L[j].dy * k2, x2: a2[0] - G2.dx * k2, y2: a2[1] - G2.dy * k2, x: a2[0], y: a2[1] });
+              cur = a2;
+              j = t - 1; // 짧은 조각들 건너뜀
+              continue;
+            }
+          }
+        }
+        const X = intersect(L[j], L[j + 1]), e = P[L[j].b];
+        if (X && dist2(X, e) < 3) lineTo(X); else { lineTo(proj(L[j], e)); lineTo(proj(L[j + 1], e)); }
+      }
+      const last = L[L.length - 1];
+      if (next && !next.curvy) {
+        const X = intersect(last, next.L[0]), e = P[P.length - 1];
+        if (X && dist2(X, e) < 4) lineTo(X); else { lineTo(proj(last, e)); lineTo(proj(next.L[0], e)); }
+      } else lineTo(proj(last, P[last.b]));
+    });
+    if (!start || !out.length) continue;
+    strokes.push({ start, segs: out, width, peak, closed: dist2(p[0], p[p.length - 1]) < 0.5 && p.length > 4 });
   }
 
   // 면으로 남길 것: 두꺼운 부분 + 선화가 아닌 덩어리(글자·점) + 그 가장자리 반투명 픽셀
   const fillB = new Uint8Array(w * h);
-  for (let i = 0; i < w * h; i++) if (B[i] && (thick[i] || !asStroke[comp[i]])) fillB[i] = 1;
+  for (let i = 0; i < w * h; i++) if (B[i] && (thick[i] || (!asStroke[comp[i]] && !isDash[comp[i]]))) fillB[i] = 1;
   const fillMask = new Float32Array(w * h);
   for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
     const i = y * w + x;
@@ -664,6 +797,11 @@ export function extractStrokes(m, w, h, o = {}) {
       const xx = x + dx, yy = y + dy;
       if (xx >= 0 && yy >= 0 && xx < w && yy < h && fillB[yy * w + xx]) { fillMask[i] = m[i]; break; }
     }
+  }
+  for (const d of dashes) {
+    let s1 = snap({ dx: d.ux, dy: d.uy, mx: d.cx, my: d.cy });
+    const hl = d.len / 2;
+    strokes.push({ start: [d.cx - s1.dx * hl, d.cy - s1.dy * hl], segs: [{ t: 'L', x: d.cx + s1.dx * hl, y: d.cy + s1.dy * hl }], width: d.width, peak: 1, closed: false, cap: 'butt', fixedWidth: true });
   }
   return { strokes, fillMask };
 }

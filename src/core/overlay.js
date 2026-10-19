@@ -1,8 +1,8 @@
 // 사진 위 그래픽 모드
 // 사진 속에 합성된 색 그래픽(바닥 사인, 로고 등)만 깨끗한 벡터로 바꾸고,
 // 그 위에 원본에서 뽑은 그림자(곱하기)·반사광(스크린) 레이어를 얹는다. 배경 사진은 그대로 둔다.
-import { compositeOnWhite } from './palette.js?v=02bfda52';
-import { DEFAULTS, vectorize, trace, photoBlocks } from './trace.js?v=02bfda52';
+import { compositeOnWhite } from './palette.js?v=afd93cf8';
+import { DEFAULTS, vectorize, trace, photoBlocks } from './trace.js?v=afd93cf8';
 
 const LIN = new Float32Array(256);
 for (let i = 0; i < 256; i++) { const v = i / 255; LIN[i] = v <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4; }
