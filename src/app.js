@@ -15,6 +15,8 @@ function seg(id, onChange) {
   return set;
 }
 const setView = seg('#view', (v) => { view = v; applyView(); });
+let mode = 'auto';
+seg('#mode', (v) => { mode = v; run(); });
 
 // ---------- 변환 ----------
 let worker = null, busy = false, jobId = 0, timer = 0;
@@ -29,7 +31,7 @@ function run() {
   busy = true;
   const id = ++jobId;
   progress(0.02, '변환 중');
-  worker.postMessage({ id, image: { width: image.width, height: image.height, data: image.data } });
+  worker.postMessage({ id, image: { width: image.width, height: image.height, data: image.data }, mode });
 }
 function onWorker(e) {
   const m = e.data;
@@ -42,7 +44,7 @@ function onWorker(e) {
   vec.innerHTML = m.svg;
   outline.innerHTML = m.svg;
   outline.querySelectorAll('[id]').forEach((el) => el.removeAttribute('id'));
-  $('#save').disabled = false;
+  $('#save').disabled = $('#copy').disabled = false;
   renderInfo(m);
   layout();
 }
@@ -58,7 +60,7 @@ function renderInfo(m) {
   const st = m.info.stats;
   $('#stats').innerHTML = `<span>패스 <b>${st.paths.toLocaleString()}</b></span><span>앵커 <b>${st.anchors.toLocaleString()}</b></span>` +
     `<span>용량 <b>${kb >= 1024 ? (kb / 1024).toFixed(1) + 'MB' : Math.round(kb) + 'KB'}</b></span><span>${(st.ms / 1000).toFixed(1)}초</span>` +
-    (m.info.mode === 'overlay' ? '<span>사진 위 그래픽: 사진은 원본, 그래픽만 벡터</span>' : m.info.photos.length ? `<span>사진 영역 <b>${m.info.photos.length}</b>곳은 원본 유지</span>` : '');
+    (m.info.mode === 'overlay' ? `<span>${mode === 'auto' ? '자동 → ' : ''}사진+그래픽: 사진은 원본, 그래픽만 벡터</span>` : `<span>${mode === 'auto' ? '자동 → ' : ''}그래픽만${m.info.photos.length ? ` · 사진 영역 <b>${m.info.photos.length}</b>곳은 원본 유지` : ''}</span>`);
 }
 
 // ---------- 파일 ----------
@@ -93,6 +95,16 @@ $('#save').addEventListener('click', () => {
   a.click();
   setTimeout(() => URL.revokeObjectURL(a.href), 1000);
 });
+$('#copy').addEventListener('click', async () => {
+  if (!result) return;
+  try { await navigator.clipboard.writeText(result.svg); flash('#copy', '복사됨'); } catch { flash('#copy', '복사 실패'); }
+});
+function flash(sel, text) {
+  const b = $(sel), t = b.textContent;
+  b.textContent = text;
+  setTimeout(() => { b.textContent = t; }, 1200);
+}
+
 // ---------- 보기: 확대·이동 ----------
 function fit() {
   if (!image) return;

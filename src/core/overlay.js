@@ -2,7 +2,7 @@
 // 사진 속에 합성된 색 그래픽(바닥 사인, 로고 등)만 깨끗한 벡터로 바꾸고,
 // 그 위에 원본에서 뽑은 그림자(곱하기)·반사광(스크린) 레이어를 얹는다. 배경 사진은 그대로 둔다.
 import { compositeOnWhite } from './palette.js';
-import { DEFAULTS, vectorize } from './trace.js';
+import { DEFAULTS, vectorize, trace, photoBlocks } from './trace.js';
 
 const LIN = new Float32Array(256);
 for (let i = 0; i < 256; i++) { const v = i / 255; LIN[i] = v <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4; }
@@ -88,10 +88,11 @@ function fillHoles(mask, w, h, maxArea) {
     if (seen[s] || mask[s] >= 0.5) continue;
     const st = [s], comp = [];
     seen[s] = 1;
-    let border = false;
+    let border = false, size = 0;
     while (st.length) {
       const c = st.pop();
-      comp.push(c);
+      size++;
+      if (size <= maxArea) comp.push(c); // 큰 영역은 끝까지 훑기만 하고 저장하지 않는다
       const x = c % w, y = (c / w) | 0;
       if (x === 0 || y === 0 || x === w - 1 || y === h - 1) border = true;
       for (const k of [c - 1, c + 1, c - w, c + w]) {
@@ -99,9 +100,8 @@ function fillHoles(mask, w, h, maxArea) {
         if ((k === c - 1 && x === 0) || (k === c + 1 && x === w - 1)) continue;
         seen[k] = 1; st.push(k);
       }
-      if (comp.length > maxArea && border) break;
     }
-    if (!border && comp.length <= maxArea) {
+    if (!border && size <= maxArea) {
       let sum = 0;
       for (const c of comp) sum += mask[c];
       if (sum / comp.length > 0.22) for (const c of comp) out[c] = 1;
@@ -110,18 +110,52 @@ function fillHoles(mask, w, h, maxArea) {
   for (let i = 0; i < w * h; i++) if (out[i]) mask[i] = 1;
 }
 
-// 알 수 없는 픽셀을 주변에서 양파 껍질처럼 채운다
+// 이진 마스크를 r px만큼 넓힌다(가로·세로 누적합)
+function dilate(m, w, h, r) {
+  const tmp = new Uint8Array(w * h), out = new Uint8Array(w * h);
+  for (let y = 0; y < h; y++) {
+    let cnt = 0;
+    for (let x = 0; x < Math.min(w, r); x++) cnt += m[y * w + x];
+    for (let x = 0; x < w; x++) {
+      if (x + r < w) cnt += m[y * w + x + r];
+      if (x - r - 1 >= 0) cnt -= m[y * w + x - r - 1];
+      tmp[y * w + x] = cnt > 0 ? 1 : 0;
+    }
+  }
+  for (let x = 0; x < w; x++) {
+    let cnt = 0;
+    for (let y = 0; y < Math.min(h, r); y++) cnt += tmp[y * w + x];
+    for (let y = 0; y < h; y++) {
+      if (y + r < h) cnt += tmp[(y + r) * w + x];
+      if (y - r - 1 >= 0) cnt -= tmp[(y - r - 1) * w + x];
+      out[y * w + x] = cnt > 0 ? 1 : 0;
+    }
+  }
+  return out;
+}
+
+// 알 수 없는 픽셀(known=0)을 주변의 아는 픽셀(known=1)에서 양파 껍질처럼 채운다. known=3은 건드리지 않음.
+// 경계에 있는 픽셀만 큐로 따라가서 전체 크기에 비례한 시간에 끝난다.
+const N8 = [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [-1, -1], [1, -1], [-1, 1]];
 function onionFill(vals, known, w, h, ch) {
-  let frontier = true;
-  while (frontier) {
-    frontier = false;
-    const add = [];
-    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
-      const i = y * w + x;
-      if (known[i]) continue;
-      const acc = new Float32Array(ch);
+  const inQ = new Uint8Array(w * h);
+  let front = [];
+  for (let i = 0; i < w * h; i++) {
+    if (known[i] !== 0) continue;
+    const x = i % w, y = (i / w) | 0;
+    for (const [dx, dy] of N8) {
+      const xx = x + dx, yy = y + dy;
+      if (xx >= 0 && yy >= 0 && xx < w && yy < h && known[yy * w + xx] === 1) { front.push(i); inQ[i] = 1; break; }
+    }
+  }
+  const acc = new Float32Array(ch);
+  while (front.length) {
+    const vals2 = [];
+    for (const i of front) {
+      const x = i % w, y = (i / w) | 0;
+      acc.fill(0);
       let cnt = 0;
-      for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [-1, -1], [1, -1], [-1, 1]]) {
+      for (const [dx, dy] of N8) {
         const xx = x + dx, yy = y + dy;
         if (xx < 0 || yy < 0 || xx >= w || yy >= h) continue;
         const k = yy * w + xx;
@@ -129,15 +163,23 @@ function onionFill(vals, known, w, h, ch) {
         for (let c = 0; c < ch; c++) acc[c] += vals[k * ch + c];
         cnt++;
       }
-      if (cnt) { add.push(i, acc.map((v) => v / cnt)); }
+      vals2.push(acc.map((v) => v / cnt));
     }
-    for (let j = 0; j < add.length; j += 2) {
-      const i = add[j], v = add[j + 1];
-      for (let c = 0; c < ch; c++) vals[i * ch + c] = v[c];
-      known[i] = 2;
-      frontier = true;
+    const next = [];
+    front.forEach((i, j) => {
+      for (let c = 0; c < ch; c++) vals[i * ch + c] = vals2[j][c];
+      known[i] = 1;
+    });
+    for (const i of front) {
+      const x = i % w, y = (i / w) | 0;
+      for (const [dx, dy] of N8) {
+        const xx = x + dx, yy = y + dy;
+        if (xx < 0 || yy < 0 || xx >= w || yy >= h) continue;
+        const k = yy * w + xx;
+        if (known[k] === 0 && !inQ[k]) { inQ[k] = 1; next.push(k); }
+      }
     }
-    for (let j = 0; j < add.length; j += 2) known[add[j]] = 1;
+    front = next;
   }
 }
 
@@ -188,12 +230,22 @@ export function traceOverlay(input, opts = {}, progress = () => {}) {
 
   // 배경 사진: 그래픽 가장자리에 번진 색을 주변 사진으로 메워 깨끗한 바탕을 만든다
   progress('배경 정리', 0.95);
+  // 다시 칠할 곳 = 벡터 도형(마스크 0.5 이상) 둘레 6px 안에서 그래픽 색이 조금이라도 남은 픽셀.
+  // 사진의 다른 곳(약한 초록 기운 등)은 건드리지 않는다.
   const plateF = new Float32Array(w * h * 3), known = new Uint8Array(w * h);
+  const amax = new Float32Array(w * h);
+  const solid = new Uint8Array(w * h);
   for (let i = 0; i < w * h; i++) {
     let a = 0;
     for (const m of masks) a = Math.max(a, m[i]);
+    amax[i] = a;
+    solid[i] = a >= 0.5 ? 1 : 0;
     plateF[i * 3] = data[i * 4]; plateF[i * 3 + 1] = data[i * 4 + 1]; plateF[i * 3 + 2] = data[i * 4 + 2];
-    known[i] = a < 0.04 ? 1 : a > 0.8 ? 3 : 0; // 3 = 벡터가 덮는 안쪽(원본 유지)
+  }
+  const near = dilate(solid, w, h, 6);
+  for (let i = 0; i < w * h; i++) {
+    const a = amax[i];
+    known[i] = !near[i] || a < 0.03 ? 1 : a > 0.8 ? 3 : 0; // 3 = 벡터가 덮는 안쪽(원본 유지)
   }
   // 1px 팽창한 번짐 띠까지 다시 그린다
   const k2 = known.slice();
@@ -216,4 +268,17 @@ export function traceOverlay(input, opts = {}, progress = () => {}) {
     layers: v.layers, shades, plate, photos: [],
     stats: { ...v.stats, ms: Date.now() - t0 },
   };
+}
+
+// 변환 진입점. mode: 'auto' | 'graphic'(그래픽만) | 'overlay'(사진+그래픽)
+// 자동: 사진 블록이 30% 넘고 채도 높은 그래픽 색이 있으면 사진+그래픽, 아니면 그래픽만(사진 영역은 원본 유지)
+export function convert(input, mode = 'auto', progress = () => {}) {
+  const img = compositeOnWhite(input);
+  const pb = photoBlocks(img);
+  const big = input.width * input.height > 3_500_000;
+  const base = { scale: big ? 1 : 2, photoBlocks: pb };
+  let m = mode;
+  if (m === 'auto') m = pb.coverage > 0.3 && autoTargets(img).length ? 'overlay' : 'graphic';
+  if (m === 'overlay') return traceOverlay(input, base, progress);
+  return trace(input, mode === 'graphic' ? { ...base, photo: false } : base, progress);
 }

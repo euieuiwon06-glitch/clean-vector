@@ -45,6 +45,8 @@ button { font: inherit; color: inherit; }
 .brand path { fill: none; stroke: var(--panel); stroke-width: 3; }
 .brand circle { fill: #30d158; }
 .bar-actions { display: flex; gap: 8px; }
+.bar { position: relative; }
+.seg.mode { position: absolute; left: 50%; transform: translateX(-50%); width: 300px; }
 
 .btn {
   height: 32px; padding: 0 14px; border-radius: 8px; border: 1px solid var(--line);
@@ -128,7 +130,6 @@ button { font: inherit; color: inherit; }
 .stage[data-view="wipe"] #outline { display: none; }
 .stage[data-view="path"] #orig { opacity: .25; }
 .stage[data-view="path"] #vec { opacity: .12; }
-.stage.picking { cursor: grab; }
 
 .wipe { position: absolute; top: 0; bottom: 0; width: 0; border-left: 1.5px solid #fff; box-shadow: 0 0 0 .5px rgba(0,0,0,.25); cursor: ew-resize; }
 .wipe span {
@@ -158,4 +159,7 @@ button { font: inherit; color: inherit; }
   .viewbar .seg { width: 100%; }
   .status { display: none; }
   .bar-actions .ghost:first-child { display: none; }
+  .seg.mode { position: static; transform: none; width: auto; flex: 1; margin: 0 8px; }
+  .seg.mode button { padding: 0 4px; font-size: 12px; }
+  #copy { display: none; }
 }

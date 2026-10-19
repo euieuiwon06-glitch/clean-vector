@@ -4,8 +4,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { PNG } from 'pngjs';
 import { Resvg } from '@resvg/resvg-js';
-import { trace, toSVG, convertAuto } from '../src/core/trace.js';
-import { traceOverlay } from '../src/core/overlay.js';
+import { trace, toSVG } from '../src/core/trace.js';
+import { traceOverlay, convert } from '../src/core/overlay.js';
 
 const file = process.argv[2];
 const opts = process.argv[3] ? JSON.parse(process.argv[3]) : {};
@@ -16,7 +16,7 @@ const prog = (s, p) => process.stdout.write(`\r${s} ${Math.round(p * 100)}%   `)
 // 옵션 없이 실행하면 앱과 같은 자동 변환
 const res = opts.mode === 'overlay' ? traceOverlay(img, opts, prog)
   : opts.mode === 'graphic' ? trace(img, opts, prog)
-  : await convertAuto(img, traceOverlay, prog);
+  : convert(img, 'auto', prog);
 console.log('\nmode', res.mode, res.palette, 'bg', res.background, res.stats, 'photos', res.photos, res.targets || '');
 
 const toPng = (w, h, rgba) => {

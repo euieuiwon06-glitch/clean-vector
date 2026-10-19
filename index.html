@@ -15,9 +15,15 @@
       <svg viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="8" /><path d="M8 23V9h7a7 7 0 0 1 0 14" /><circle cx="8" cy="23" r="2.6" /></svg>
       <span>Clean Vector</span>
     </div>
+    <div class="seg mode" id="mode" role="tablist" aria-label="변환 방식">
+      <button data-v="auto" class="on" title="이미지를 보고 알아서 고릅니다">자동</button>
+      <button data-v="graphic" title="로고·일러스트·선화 등 전체를 벡터로">그래픽만</button>
+      <button data-v="overlay" title="사진은 원본 그대로, 위에 얹힌 색 그래픽만 벡터로">사진+그래픽</button>
+    </div>
     <div class="bar-actions">
       <label class="btn ghost" for="file" id="openBtn">이미지 열기<input id="file" type="file" accept="image/png,image/jpeg,image/webp" hidden /></label>
-            <button class="btn primary" id="save" disabled>SVG 저장</button>
+            <button class="btn ghost" id="copy" disabled>SVG 복사</button>
+      <button class="btn primary" id="save" disabled>SVG 저장</button>
     </div>
   </header>
 

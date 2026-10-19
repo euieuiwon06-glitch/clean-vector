@@ -1,4 +1,4 @@
-import { compositeOnWhite, buildPalette, unmix } from './palette.js';
+import { compositeOnWhite, buildPalette, unmix, denoise } from './palette.js';
 import { maskBounds, upsample, gaussianBlur, preserveThin, marchingSquares } from './contour.js';
 import { resampleClosed, analyzeContour, alignRuns, equalizeStrokes, buildPath } from './fit.js';
 
@@ -89,7 +89,7 @@ function detectPhotos(img, pb) {
 export function trace(input, opts = {}, progress = () => {}) {
   const o = { ...DEFAULTS, ...opts };
   const t0 = Date.now();
-  let img = compositeOnWhite(input);
+  let img = denoise(compositeOnWhite(input));
   const { width: w, height: h } = img;
   progress('색 정리', 0.05);
   let palette = buildPalette(img, o.colors);
@@ -149,16 +149,6 @@ export function trace(input, opts = {}, progress = () => {}) {
     layers: v.layers, photos,
     stats: { ...v.stats, ms: Date.now() - t0 },
   };
-}
-
-// 설정 없이 자동 변환: 사진이 대부분이면 "사진 위 그래픽", 아니면 그래픽 전체(사진 영역은 원본 유지)
-export async function convertAuto(input, traceOverlay, progress = () => {}) {
-  const img = compositeOnWhite(input);
-  const pb = photoBlocks(img);
-  const big = input.width * input.height > 3_500_000;
-  const base = { scale: big ? 1 : 2, photoBlocks: pb };
-  if (pb.coverage > 0.45) return traceOverlay(input, base, progress);
-  return trace(input, base, progress);
 }
 
 // 색별 마스크 → 정리된 패스 레이어

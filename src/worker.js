@@ -1,6 +1,6 @@
 // 변환은 워커에서: 화면이 멈추지 않게
-import { convertAuto, toSVG } from './core/trace.js';
-import { traceOverlay } from './core/overlay.js';
+import { toSVG } from './core/trace.js';
+import { convert } from './core/overlay.js';
 
 async function encode(w, h, rgba, type = 'image/png', quality) {
   const c = new OffscreenCanvas(w, h);
@@ -41,11 +41,11 @@ function collectAnchors(res) {
 }
 
 self.onmessage = async (e) => {
-  const { id, image } = e.data;
+  const { id, image, mode } = e.data;
   const opts = { background: true, photoFormat: 'image/jpeg' };
   try {
     const progress = (label, p) => self.postMessage({ id, type: 'progress', label, p });
-    const res = await convertAuto(image, traceOverlay, progress);
+    const res = convert(image, mode, progress);
     const hrefs = { photos: [], shades: [] };
     const { width: W, data } = image;
     for (const r of res.photos || []) {

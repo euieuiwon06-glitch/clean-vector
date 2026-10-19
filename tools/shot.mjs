@@ -12,6 +12,7 @@ page.on('pageerror', (e) => errs.push(String(e)));
 await page.goto('http://127.0.0.1:5333/', { waitUntil: 'networkidle0' });
 await page.evaluate(() => localStorage.clear());
 await page.reload({ waitUntil: 'networkidle0' });
+if (process.env.MODE) await page.click(`#mode button[data-v="${process.env.MODE}"]`);
 const input = await page.$('#file');
 await input.uploadFile(path.resolve(file));
 await page.waitForFunction(() => !document.querySelector('#save').disabled, { timeout: 120000 });

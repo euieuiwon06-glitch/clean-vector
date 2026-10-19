@@ -1,5 +1,32 @@
 // 색 정리: 가장자리(안티앨리어싱) 픽셀을 빼고 평탄한 픽셀만으로 대표색을 뽑는다.
 
+// 경계 보존 잡음 제거(양방향 필터): 면 안의 잔 얼룩·압축 잡음은 지우고 선·경계는 그대로 둔다
+export function denoise(img, sigmaR = 16) {
+  const { width: w, height: h, data } = img;
+  const out = new Uint8ClampedArray(data.length);
+  const lut = new Float32Array(3 * 256 * 256);
+  for (let i = 0; i < lut.length; i++) lut[i] = Math.exp(-i / (2 * sigmaR * sigmaR * 3));
+  const sw = [];
+  for (let dy = -2; dy <= 2; dy++) for (let dx = -2; dx <= 2; dx++) sw.push(dx, dy, Math.exp(-(dx * dx + dy * dy) / (2 * 1.5 * 1.5)));
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const i = (y * w + x) * 4;
+      const r0 = data[i], g0 = data[i + 1], b0 = data[i + 2];
+      let ar = 0, ag = 0, ab = 0, aw = 0;
+      for (let k = 0; k < sw.length; k += 3) {
+        const xx = x + sw[k], yy = y + sw[k + 1];
+        if (xx < 0 || yy < 0 || xx >= w || yy >= h) continue;
+        const j = (yy * w + xx) * 4;
+        const dr = data[j] - r0, dg = data[j + 1] - g0, db = data[j + 2] - b0;
+        const wt = sw[k + 2] * lut[dr * dr + dg * dg + db * db];
+        ar += data[j] * wt; ag += data[j + 1] * wt; ab += data[j + 2] * wt; aw += wt;
+      }
+      out[i] = ar / aw; out[i + 1] = ag / aw; out[i + 2] = ab / aw; out[i + 3] = 255;
+    }
+  }
+  return { ...img, data: out };
+}
+
 export function compositeOnWhite(img) {
   const { width: w, height: h, data } = img;
   const out = new Uint8ClampedArray(w * h * 4);
@@ -74,7 +101,7 @@ function kmeans(s, k, rand) {
 
 export function buildPalette(img, kIn) {
   const auto = !kIn || kIn === 'auto';
-  const k = auto ? 12 : kIn;
+  const k = auto ? 16 : kIn;
   const { width: w, height: h, data } = img;
   const step = Math.max(1, Math.floor(Math.sqrt((w * h) / 120000)));
   const s = [];
@@ -97,12 +124,12 @@ export function buildPalette(img, kIn) {
   const size = new Float64Array(C.length);
   for (let i = 0; i < n; i++) size[assign[i]]++;
   let cl = C.map((c, j) => ({ c, n: size[j] })).filter((q) => q.n > n * (auto ? 0.0008 : 0.0002));
-  // 너무 비슷한 색은 큰 쪽으로 합친다
+  // 비슷한 색은 큰 쪽으로 합친다. 음영(밝기 차이)은 덜 따지고 색조·채도 차이는 그대로 본다:
+  // 그늘진 바닥은 한 색으로, 바닥 초록과 잎 초록은 다른 색으로.
   cl.sort((a, b) => b.n - a.n);
   const merged = [];
-  const lim = auto ? 48 : 18;
   for (const q of cl) {
-    const m = merged.find((p) => Math.hypot(p.c[0] - q.c[0], p.c[1] - q.c[1], p.c[2] - q.c[2]) < lim);
+    const m = merged.find((p) => colorDist(p.c, q.c) < (auto ? 13 : 6));
     if (m) m.n += q.n; else merged.push({ ...q });
   }
   // 가는 선의 색: 평평한 픽셀이 거의 없어 위에서 빠진다. 주변보다 진한(또는 밝은) 능선 픽셀에서 따로 뽑는다.
@@ -114,11 +141,66 @@ export function buildPalette(img, kIn) {
     for (let i = 0; i < rn; i++) rsize[ra[i]]++;
     RC.map((c, j) => ({ c, n: rsize[j] })).sort((a, b) => b.n - a.n).forEach((q) => {
       if (q.n < rn * 0.05) return;
-      if (merged.some((p) => Math.hypot(p.c[0] - q.c[0], p.c[1] - q.c[1], p.c[2] - q.c[2]) < 45)) return;
+      if (merged.some((p) => colorDist(p.c, q.c) < 13)) return;
       merged.push(q);
     });
   }
+  // 질감 있는 면의 색(잎, 무늬 등): 지금 대표색 두 개의 혼합으로도 설명이 안 되는 픽셀을 모아 추가한다
+  if (auto) {
+    const pal = merged.map((q) => q.c);
+    const miss = [];
+    const st2 = Math.max(1, Math.floor(Math.sqrt((w * h) / 150000)));
+    let total = 0;
+    for (let y = 0; y < h; y += st2) for (let x = 0; x < w; x += st2) {
+      const i = (y * w + x) * 4;
+      total++;
+      if (pairResidual(pal, data[i], data[i + 1], data[i + 2]) > 34) miss.push(data[i], data[i + 1], data[i + 2]);
+    }
+    const mn = miss.length / 3;
+    if (mn > total * 0.004) {
+      const { C: MC, assign: ma } = kmeans(miss, Math.min(4, mn), mulberry32(5));
+      const msize = new Float64Array(MC.length);
+      for (let i = 0; i < mn; i++) msize[ma[i]]++;
+      MC.map((c, j) => ({ c, n: msize[j] })).sort((a, b) => b.n - a.n).forEach((q) => {
+        if (q.n < total * 0.003) return;
+        if (merged.some((p) => colorDist(p.c, q.c) < 13)) return;
+        merged.push(q);
+      });
+    }
+  }
   return merged.map((q) => q.c.map((v) => Math.round(v)));
+}
+
+// 색 하나를 대표색 두 개의 혼합으로 설명할 때 남는 오차
+function pairResidual(pal, r, g, b) {
+  let best = Infinity;
+  for (let a = 0; a < pal.length; a++) {
+    const pa = pal[a];
+    best = Math.min(best, (r - pa[0]) ** 2 + (g - pa[1]) ** 2 + (b - pa[2]) ** 2);
+    for (let c = a + 1; c < pal.length; c++) {
+      const pc = pal[c];
+      const vx = pc[0] - pa[0], vy = pc[1] - pa[1], vz = pc[2] - pa[2];
+      const vv = vx * vx + vy * vy + vz * vz;
+      if (vv < 1) continue;
+      let t = ((r - pa[0]) * vx + (g - pa[1]) * vy + (b - pa[2]) * vz) / vv;
+      t = t < 0 ? 0 : t > 1 ? 1 : t;
+      best = Math.min(best, (r - pa[0] - vx * t) ** 2 + (g - pa[1] - vy * t) ** 2 + (b - pa[2] - vz * t) ** 2);
+    }
+  }
+  return Math.sqrt(best);
+}
+
+function lab(c) {
+  const f = (v) => { v /= 255; return v <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4; };
+  const r = f(c[0]), g = f(c[1]), b = f(c[2]);
+  const X = (0.4124 * r + 0.3576 * g + 0.1805 * b) / 0.9505, Y = 0.2126 * r + 0.7152 * g + 0.0722 * b, Z = (0.0193 * r + 0.1192 * g + 0.9505 * b) / 1.089;
+  const t = (v) => (v > 0.008856 ? Math.cbrt(v) : 7.787 * v + 16 / 116);
+  return [116 * t(Y) - 16, 500 * (t(X) - t(Y)), 200 * (t(Y) - t(Z))];
+}
+// 밝기 차이는 절반만 반영하는 색 거리
+export function colorDist(c1, c2) {
+  const a = lab(c1), b = lab(c2);
+  return Math.hypot((a[0] - b[0]) * 0.5, a[1] - b[1], a[2] - b[2]);
 }
 
 const lumAt = (d, i) => d[i] * 0.299 + d[i + 1] * 0.587 + d[i + 2] * 0.114;
@@ -239,7 +321,7 @@ export function unmix(img, palette, coreDist = 34) {
           let t = ((r - pa[0]) * vx + (g - pa[1]) * vy + (b - pa[2]) * vz) / vv;
           t = t < 0 ? 0 : t > 1 ? 1 : t;
           const ex = r - (pa[0] + vx * t), ey = g - (pa[1] + vy * t), ez = b - (pa[2] + vz * t);
-          const d = ex * ex + ey * ey + ez * ez + 0.004 * vv * t * (1 - t);
+          const d = ex * ex + ey * ey + ez * ez;
           if (d < bestR) { bestR = d; ba = a; bb = c; bt = t; }
         }
       }
