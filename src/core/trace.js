@@ -1,7 +1,7 @@
-import { compositeOnWhite, buildPalette, unmix, denoise } from './palette.js?v=8e72d564';
-import { extractStrokes, inkCoverage } from './strokes.js?v=8e72d564';
-import { maskBounds, upsample, gaussianBlur, preserveThin, marchingSquares } from './contour.js?v=8e72d564';
-import { resampleClosed, analyzeContour, alignRuns, equalizeStrokes, buildPath, fitCircle, snapConcentric } from './fit.js?v=8e72d564';
+import { compositeOnWhite, buildPalette, unmix, denoise } from './palette.js?v=37556a61';
+import { extractStrokes, inkCoverage } from './strokes.js?v=37556a61';
+import { maskBounds, upsample, gaussianBlur, preserveThin, marchingSquares } from './contour.js?v=37556a61';
+import { resampleClosed, analyzeContour, alignRuns, equalizeStrokes, buildPath, fitCircle, snapConcentric } from './fit.js?v=37556a61';
 
 export const DEFAULTS = {
   colors: 'auto',   // 대표색 개수(숫자 또는 auto)
@@ -14,7 +14,7 @@ export const DEFAULTS = {
   snapDeg: 5,       // 수평·수직 고정 각도
   snap45: false,
   cornerTol: 0.9,   // 코너 복원 허용 오차(px)
-  minFillet: 1.8,   // 이보다 작은 둥글림은 흐림 탓으로 보고 날카로운 코너로 복원(px)
+  minFillet: 6,   // 이보다 작은 둥글림은 흐림 탓으로 보고 날카로운 코너로 복원(px)
   cornerAngle: 55,  // 곡선 속 코너로 볼 꺾임 각
   curveTol: 0.45,   // 곡선 허용 오차(px)
   circleTol: 0.35,
@@ -237,6 +237,72 @@ function cleanRegions(masks, palette, bg, w, h, img) {
   }
 }
 
+// 선이 이미 찾은 원(마커 점 등)과 같은 중심을 돌면 그 부분을 정확한 원호로 바꾼다
+function snapStrokeCircles(strokes, centers) {
+  const flat = (st) => {
+    const pts = [st.start];
+    let p = st.start;
+    for (const g of st.segs) {
+      if (g.t === 'L') pts.push([g.x, g.y]);
+      else for (let i = 1; i <= 8; i++) {
+        const t = i / 8, u = 1 - t;
+        pts.push([u * u * u * p[0] + 3 * u * u * t * g.x1 + 3 * u * t * t * g.x2 + t * t * t * g.x, u * u * u * p[1] + 3 * u * u * t * g.y1 + 3 * u * t * t * g.y2 + t * t * t * g.y]);
+      }
+      p = [g.x, g.y];
+    }
+    return pts;
+  };
+  for (const st of strokes) {
+    if (st.cap === 'butt') continue;
+    for (const { cx, cy, r0 } of centers) {
+      const pts = flat(st);
+      const rs = pts.map((q) => Math.hypot(q[0] - cx, q[1] - cy));
+      const lim = r0 * 4 + 8;
+      const near = rs.filter((r) => r < lim && r > r0 + 0.8);
+      if (near.length < 4) continue;
+      const H = new Map();
+      for (const r of near) { const k = Math.round(r * 2); H.set(k, (H.get(k) || 0) + 1); }
+      let bk = 0, bv = 0;
+      for (const [k] of H) { const v = (H.get(k - 1) || 0) + (H.get(k) || 0) + (H.get(k + 1) || 0); if (v > bv) { bv = v; bk = k; } }
+      const R = bk / 2;
+      // 띠 안의 연속 구간
+      let a = -1, best = null;
+      for (let i = 0; i <= pts.length; i++) {
+        const inb = i < pts.length && Math.abs(rs[i] - R) < 1.4;
+        if (inb && a < 0) a = i;
+        if (!inb && a >= 0) {
+          const b = i - 1;
+          let sweep = 0;
+          for (let j = a + 1; j <= b; j++) { let d = Math.atan2(pts[j][1] - cy, pts[j][0] - cx) - Math.atan2(pts[j - 1][1] - cy, pts[j - 1][0] - cx); if (d > Math.PI) d -= 2 * Math.PI; if (d < -Math.PI) d += 2 * Math.PI; sweep += d; }
+          if (!best || Math.abs(sweep) > Math.abs(best.sweep)) best = { a, b, sweep };
+          a = -1;
+        }
+      }
+      if (!best || Math.abs(best.sweep) < Math.PI / 3) continue;
+      const a0 = Math.atan2(pts[best.a][1] - cy, pts[best.a][0] - cx);
+      const n = Math.ceil(Math.abs(best.sweep) / (Math.PI / 2)), da = best.sweep / n, k = (4 / 3) * Math.tan(da / 4) * R;
+      const arc = [];
+      let an = a0;
+      for (let i = 0; i < n; i++) {
+        const b2 = an + da;
+        const p0 = [cx + R * Math.cos(an), cy + R * Math.sin(an)], p1 = [cx + R * Math.cos(b2), cy + R * Math.sin(b2)];
+        arc.push({ t: 'C', x1: p0[0] - k * Math.sin(an), y1: p0[1] + k * Math.cos(an), x2: p1[0] + k * Math.sin(b2), y2: p1[1] - k * Math.cos(b2), x: p1[0], y: p1[1] });
+        an = b2;
+      }
+      const startArc = [cx + R * Math.cos(a0), cy + R * Math.sin(a0)];
+      const before = pts.slice(0, best.a), after = pts.slice(best.b + 1);
+      const segs = [];
+      const start = before.length ? before[0] : startArc;
+      for (const q of before.slice(1)) segs.push({ t: 'L', x: q[0], y: q[1] });
+      if (before.length) segs.push({ t: 'L', x: startArc[0], y: startArc[1] });
+      segs.push(...arc);
+      for (const q of after) segs.push({ t: 'L', x: q[0], y: q[1] });
+      st.start = start; st.segs = segs;
+      break;
+    }
+  }
+}
+
 function flattenFaces(masks, palette, bg, ink, cov, w, h, img) {
   const n = w * h, K = palette.length, d = img.data;
   const cdiff = (p, q) => Math.abs(d[p * 4] - d[q * 4]) + Math.abs(d[p * 4 + 1] - d[q * 4 + 1]) + Math.abs(d[p * 4 + 2] - d[q * 4 + 2]);
@@ -429,12 +495,12 @@ export function trace(input, opts = {}, progress = () => {}) {
     // 선 아래로 색 면을 이어 칠한다: 선을 빼도 초록 면에 구멍(흰 테두리)이 남지 않게
     fillUnderInk(stacked.filter((it) => !it.ink), cov, w, h);
     if (o.debugCov) o.debugCov(cov);
-    const r = extractStrokes(cov, w, h, { lineTol: 0.75, snapDeg: 6, binTh: 0.2 });
+    const r = extractStrokes(cov, w, h, { lineTol: 0.75, snapDeg: 8, binTh: 0.2 });
     const bc = palette[bg], ic = ink.rgb;
     // 색은 검정·회색 두 가지, 굵기는 길이 가중 2~3단계로 통일
     const gray = hex(ic.map((v, k) => Math.round(bc[k] + (v - bc[k]) * 0.5)));
     // 흐림 때문에 재는 폭이 실제보다 굵게 나와 0.8배로 보정
-    for (const st of r.strokes) if (!st.fixedWidth) st.width *= 0.8;
+    for (const st of r.strokes) if (!st.fixedWidth) st.width *= 0.95;
     const levels = widthLevels(r.strokes.filter((st) => !st.fixedWidth));
     strokes = r.strokes.map((st) => {
       const wq = st.fixedWidth ? Math.round(st.width * 4) / 4 : levels.reduce((a, b) => (Math.abs(b - st.width) < Math.abs(a - st.width) ? b : a));
@@ -443,6 +509,7 @@ export function trace(input, opts = {}, progress = () => {}) {
     stacked[inkIdx] = { ...ink, mask: r.fillMask };
   }
   const v = vectorize(stacked, w, h, o, progress);
+  if (strokes.length && v.centers?.length) snapStrokeCircles(strokes, v.centers);
   progress('완료', 1);
   return {
     mode: 'graphic',
@@ -488,7 +555,7 @@ export function vectorize(items, w, h, o, progress = () => {}) {
     for (const c of L.cs) {
       // 거의 원이면(작은 도형) 정확한 원으로
       const ci = fitCircle(c.xs, c.ys, c.n);
-      if (ci && ci.r >= 1.5 && ci.r <= 40 && ci.maxd <= Math.max(0.6, ci.r * 0.12) && Math.abs(c.area - Math.PI * ci.r * ci.r) < Math.PI * ci.r * ci.r * 0.2) {
+      if (ci && ci.r >= 1.5 && ci.r <= 40 && ci.maxd <= Math.max(0.9, ci.r * (ci.r < 8 ? 0.2 : 0.12)) && Math.abs(c.area - Math.PI * ci.r * ci.r) < Math.PI * ci.r * ci.r * 0.22) {
         // 가까운 기준 중심이 있으면 그 중심에 맞춘다(동심원 정렬)
         const ctr = centers.find((q) => Math.hypot(q.cx - ci.cx, q.cy - ci.cy) < Math.max(1.2, ci.r * 0.25));
         shapes.push({ kind: 'circle', cx: ctr ? ctr.cx : ci.cx, cy: ctr ? ctr.cy : ci.cy, r: ci.r });
@@ -511,7 +578,7 @@ export function vectorize(items, w, h, o, progress = () => {}) {
     delete l.shapes;
     for (const p of l.paths) { pathCount++; anchors += p.circle || p.ellipse ? 4 : p.segs.length; }
   }
-  return { layers, stats: { anchors, paths: pathCount } };
+  return { layers, centers, stats: { anchors, paths: pathCount } };
 }
 
 const f2 = (v) => {

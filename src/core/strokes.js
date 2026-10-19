@@ -3,7 +3,7 @@
 // 2) 뼈대를 끝점·교차점 사이 선들로 나눠
 // 3) 직선은 그림의 주요 방향으로 정렬한 선분, 곡선은 매끈한 베지어로 맞추고
 // 4) 선마다 원본 단면에서 굵기·진하기를 재서 일정한 굵기의 획으로 만든다.
-import { fitCubic } from './fit.js?v=8e72d564';
+import { fitCubic } from './fit.js?v=37556a61';
 
 const DEG = Math.PI / 180;
 
@@ -393,6 +393,182 @@ function consolidateLines(lines) {
   }
 }
 
+// 끝점 용접(강제 교정): 열린 직선 끝을 주변과 확실히 잇는다.
+// 1) 끝점 두 개가 r 안에 있고 방향이 다르면 → 두 끝선의 교점으로 모아 모서리
+// 2) 끝점이 다른 직선 옆 r 안에 있으면 → 그 직선까지 늘리거나 잘라 T자로
+function weldEnds(strokes, r) {
+  // 끝의 짧은 꺾인 조각(둥글게 말린 모서리 반쪽)은 떼어 두고, 긴 직선 방향으로 판단한다
+  for (const st of strokes) {
+    if (st.closed) continue;
+    for (const atStart of [false, true]) {
+      // 끝 쪽 조각 목록(끝에서 안쪽 순서): [점, 그 점으로 들어오는 조각]
+      const pts = [st.start, ...st.segs.map((g) => [g.x, g.y])];
+      const n = pts.length;
+      if (n < 3) continue;
+      const segAt = (m) => st.segs[m - 1]; // pts[m-1] → pts[m]
+      const idx = (k) => (atStart ? k : n - 1 - k); // 끝에서 k번째 점의 인덱스
+      const segBetween = (k) => (atStart ? segAt(idx(k)) : segAt(idx(k - 1) + 0 === idx(k - 1) ? idx(k - 1) : idx(k - 1))); // 끝에서 k-1 ↔ k 사이 조각
+      void segBetween;
+      // 끝에서 안쪽으로 걸어가며 짧은 직선 조각 합산
+      let k = 0, acc = 0, ok = true;
+      while (k < n - 2) {
+        const a = pts[idx(k)], b = pts[idx(k + 1)];
+        const g = atStart ? st.segs[idx(k)] : st.segs[idx(k) - 1];
+        if (!g || g.t !== 'L') { ok = false; break; }
+        const l = dist2(a, b);
+        if (l >= 9 || acc + l >= 16) break;
+        acc += l; k++;
+      }
+      if (!ok || k === 0) continue;
+      const g2 = atStart ? st.segs[idx(k)] : st.segs[idx(k) - 1];
+      if (!g2 || g2.t !== 'L' || dist2(pts[idx(k)], pts[idx(k + 1)]) < 6) continue;
+      const P0 = pts[idx(k)], P1 = pts[idx(k + 1)];
+      const dx = P0[0] - P1[0], dy = P0[1] - P1[1], dl = Math.hypot(dx, dy);
+      const tip = pts[idx(0)];
+      if (Math.abs((tip[0] - P0[0]) * dy - (tip[1] - P0[1]) * dx) / dl < 0.8) continue;
+      const removed = [];
+      for (let q = 0; q < k; q++) removed.push(pts[idx(q)]);
+      if (atStart) { st.start = P0; st.segs = st.segs.slice(k); }
+      else st.segs = st.segs.slice(0, st.segs.length - k);
+      (st.curl ||= {})[atStart ? 'start' : 'end'] = removed;
+    }
+  }
+  const ends = [];
+  strokes.forEach((st, k) => {
+    if (st.closed || !st.segs.length) return;
+    const pts = [st.start, ...st.segs.map((g) => [g.x, g.y])];
+    const n = pts.length;
+    // 끝 조각이 직선일 때만
+    if (st.segs[0].t === 'L') ends.push({ k, st: true, p: pts[0], q: pts[1] });
+    if (st.segs[n - 2].t === 'L') ends.push({ k, st: false, p: pts[n - 1], q: pts[n - 2] });
+  });
+  const setEnd = (e, pt) => {
+    const s0 = strokes[e.k];
+    if (e.st) s0.start = pt; else { const g = s0.segs[s0.segs.length - 1]; g.x = pt[0]; g.y = pt[1]; }
+    e.p = pt;
+  };
+  const line = (e) => { const dx = e.p[0] - e.q[0], dy = e.p[1] - e.q[1], l = Math.hypot(dx, dy) || 1; return { mx: e.q[0], my: e.q[1], dx: dx / l, dy: dy / l, len: l }; };
+  const used = new Set();
+    const cl = (e) => { const c = strokes[e.k].curl?.[e.st ? 'start' : 'end']; if (!c) return 0; let t = dist2(c[c.length - 1], e.p); for (let q = 1; q < c.length; q++) t += dist2(c[q], c[q - 1]); return t; };
+  // 1) 끝점끼리
+  const pairs = [];
+  for (let i = 0; i < ends.length; i++) for (let j = i + 1; j < ends.length; j++) {
+    const A = ends[i], B = ends[j];
+    if (A.k === B.k) continue;
+    const g = dist2(A.p, B.p);
+    if (g > r + cl(A) + cl(B)) continue;
+    pairs.push([g, i, j]);
+  }
+  pairs.sort((a, b) => a[0] - b[0]);
+  for (const [, i, j] of pairs) {
+    if (used.has(i) || used.has(j)) continue;
+    const A = ends[i], B = ends[j], LA = line(A), LB = line(B);
+    const sin = Math.abs(LA.dx * LB.dy - LA.dy * LB.dx);
+    let X;
+    if (sin > Math.sin(25 * DEG)) {
+      X = intersect(LA, LB);
+      if (!X || dist2(X, A.p) > r * 1.5 + cl(A) || dist2(X, B.p) > r * 1.5 + cl(B)) continue;
+      // 교점이 선 안쪽으로 너무 들어가면(선을 깎아먹음) 안 됨
+      if ((X[0] - A.q[0]) * LA.dx + (X[1] - A.q[1]) * LA.dy < LA.len * 0.5) continue;
+      if ((X[0] - B.q[0]) * LB.dx + (X[1] - B.q[1]) * LB.dy < LB.len * 0.5) continue;
+    } else if (LA.dx * LB.dx + LA.dy * LB.dy < -0.9) {
+      X = [(A.p[0] + B.p[0]) / 2, (A.p[1] + B.p[1]) / 2]; // 일직선으로 마주봄 → 가운데서 만남
+    } else continue;
+    const curlA = strokes[A.k].curl?.[A.st ? 'start' : 'end'] || [], curlB = strokes[B.k].curl?.[B.st ? 'start' : 'end'] || [];
+    const curl = curlA.concat(curlB);
+    let dmin = Infinity;
+    for (const c of curl) dmin = Math.min(dmin, dist2(c, X));
+    if (sin > Math.sin(25 * DEG) && curl.length && dmin > 1.2) {
+      // 원래 둥근 모서리 → 두 직선에 접하는 원호로 잇는다
+      const dA = dist2(X, A.p), dB = dist2(X, B.p), d = Math.min(Math.max(dA, dB), Math.min(LA.len, LB.len) * 0.9);
+      const pA = [X[0] - LA.dx * d, X[1] - LA.dy * d], pB = [X[0] - LB.dx * d, X[1] - LB.dy * d];
+      const turn = Math.acos(Math.max(-1, Math.min(1, -(LA.dx * LB.dx + LA.dy * LB.dy))));
+      const ang = Math.PI - turn, rr = d * Math.tan(turn / 2) || d, kk = (4 / 3) * Math.tan(ang / 4) * rr;
+      setEnd(A, pA); setEnd(B, pB);
+      const sA = strokes[A.k];
+      const arcSeg = { t: 'C', x1: pA[0] + LA.dx * kk, y1: pA[1] + LA.dy * kk, x2: pB[0] + LB.dx * kk, y2: pB[1] + LB.dy * kk, x: pB[0], y: pB[1] };
+      if (A.st) { // A의 시작에 붙인다: 시작점을 pB로, 첫 조각을 원호(뒤집기)로
+        sA.segs.unshift({ t: 'C', x1: arcSeg.x2, y1: arcSeg.y2, x2: arcSeg.x1, y2: arcSeg.y1, x: pA[0], y: pA[1] });
+        sA.start = pB;
+      } else sA.segs.push(arcSeg);
+      used.add(i); used.add(j);
+      continue;
+    }
+    setEnd(A, X); setEnd(B, X);
+    used.add(i); used.add(j);
+  }
+  // 짝을 못 찾은 끝은 떼어 둔 조각을 되돌린다(선이 짧아지지 않게)
+  ends.forEach((e, i) => {
+    if (used.has(i)) return;
+    const st = strokes[e.k], c = st.curl?.[e.st ? 'start' : 'end'];
+    if (!c || !c.length) return;
+    const back = c.slice().reverse(); // 안쪽→끝 순서
+    if (e.st) { const pts = back.reverse(); st.segs.unshift(...[...pts.slice(1), st.start].map(([x, y]) => ({ t: 'L', x, y }))); st.start = pts[0]; e.p = st.start; }
+    else { st.segs.push(...back.map(([x, y]) => ({ t: 'L', x, y }))); e.p = back[back.length - 1]; }
+    e.q = e.st ? (st.segs[0].t === 'L' ? [st.segs[0].x, st.segs[0].y] : e.q) : e.q;
+  });
+  // 2) 끝점 → 다른 직선(T자)
+  const segs = [];
+  strokes.forEach((st, k) => {
+    const pts = [st.start, ...st.segs.map((g) => [g.x, g.y])];
+    st.segs.forEach((g, m) => { if (g.t === 'L') segs.push({ k, a: pts[m], b: pts[m + 1] }); });
+  });
+  ends.forEach((e, i) => {
+    if (used.has(i)) return;
+    const L = line(e);
+    let best = null;
+    for (const sg of segs) {
+      if (sg.k === e.k) continue;
+      const sx = sg.b[0] - sg.a[0], sy = sg.b[1] - sg.a[1];
+      const den = L.dx * sy - L.dy * sx;
+      if (Math.abs(den) < Math.hypot(sx, sy) * Math.sin(20 * DEG)) continue;
+      const t = ((sg.a[0] - e.p[0]) * sy - (sg.a[1] - e.p[1]) * sx) / den;
+      const u = ((sg.a[0] - e.p[0]) * L.dy - (sg.a[1] - e.p[1]) * L.dx) / den;
+      if (u < -0.02 || u > 1.02 || t < -r || t > r) continue;
+      if (t < 0 && -t > L.len * 0.5) continue; // 자르면 선이 반 넘게 없어짐
+      if (!best || Math.abs(t) < Math.abs(best.t)) best = { t };
+    }
+    if (best && Math.abs(best.t) > 0.05) setEnd(e, [e.p[0] + L.dx * best.t, e.p[1] + L.dy * best.t]);
+  });
+}
+
+// 곡선 조각이 원호에 잘 맞으면(오차 ≤ max(0.45, r×6%)) 정확한 원호로. 시작·끝점은 원 위로 옮긴다
+function arcFit(q) {
+  const n = q.length;
+  let sx = 0, sy = 0, sxx = 0, syy = 0, sxy = 0, sxz = 0, syz = 0, sz = 0;
+  for (const [x, y] of q) { const z = x * x + y * y; sx += x; sy += y; sxx += x * x; syy += y * y; sxy += x * y; sxz += x * z; syz += y * z; sz += z; }
+  const M = [[sxx, sxy, sx, -sxz], [sxy, syy, sy, -syz], [sx, sy, n, -sz]];
+  for (let c = 0; c < 3; c++) {
+    let pv = c; for (let r = c + 1; r < 3; r++) if (Math.abs(M[r][c]) > Math.abs(M[pv][c])) pv = r;
+    if (Math.abs(M[pv][c]) < 1e-9) return null;
+    [M[c], M[pv]] = [M[pv], M[c]];
+    for (let r = 0; r < 3; r++) if (r !== c) { const f = M[r][c] / M[c][c]; for (let k = c; k < 4; k++) M[r][k] -= f * M[c][k]; }
+  }
+  const D = M[0][3] / M[0][0], E = M[1][3] / M[1][1], F = M[2][3] / M[2][2];
+  const cx = -D / 2, cy = -E / 2, r2 = cx * cx + cy * cy - F;
+  if (r2 <= 0) return null;
+  const r = Math.sqrt(r2);
+  if (r > 80 || r < 1.5) return null;
+  let md = 0;
+  for (const [x, y] of q) md = Math.max(md, Math.abs(Math.hypot(x - cx, y - cy) - r));
+  if (md > Math.max(0.45, r * 0.06)) return null;
+  // 진행 각도(누적)
+  let a0 = Math.atan2(q[0][1] - cy, q[0][0] - cx), prev = a0, total = 0;
+  for (let i = 1; i < n; i++) { const a = Math.atan2(q[i][1] - cy, q[i][0] - cx); let d = a - prev; if (d > Math.PI) d -= 2 * Math.PI; if (d < -Math.PI) d += 2 * Math.PI; total += d; prev = a; }
+  if (Math.abs(total) < 25 * DEG) return null;
+  const pieces = Math.ceil(Math.abs(total) / (Math.PI / 2));
+  const da = total / pieces, k = (4 / 3) * Math.tan(da / 4) * r;
+  const segs = [];
+  let a = a0;
+  for (let i = 0; i < pieces; i++) {
+    const b = a + da;
+    const p0 = [cx + r * Math.cos(a), cy + r * Math.sin(a)], p1 = [cx + r * Math.cos(b), cy + r * Math.sin(b)];
+    segs.push({ t: 'C', x1: p0[0] - k * Math.sin(a), y1: p0[1] + k * Math.cos(a), x2: p1[0] + k * Math.sin(b), y2: p1[1] - k * Math.cos(b), x: p1[0], y: p1[1] });
+    a = b;
+  }
+  return { segs, start: [cx + r * Math.cos(a0), cy + r * Math.sin(a0)] };
+}
+
 // 선 끝 펴기: 끝 2.5px 안에서 안쪽 직선(끝에서 2~8px 구간)을 벗어나 굽은 점은 그 직선 위로 옮긴다.
 // 교차점 근처에서 뼈대가 휘는 현상 때문에 T자·모서리가 둥글게 나오는 것을 막는다.
 function straightenEnds(p) {
@@ -694,7 +870,7 @@ export function extractStrokes(m, w, h, o = {}) {
   const snap = (s) => {
     let ang = Math.atan2(s.dy, s.dx);
     for (const d of doms) for (const base of [d, d + Math.PI, d - Math.PI, d - 2 * Math.PI]) {
-      if (Math.abs(ang - base) < (o.snapDeg ?? 3.5) * DEG) return { ...s, dx: Math.cos(base), dy: Math.sin(base) };
+      if (Math.abs(ang - base) < (s.len !== undefined && s.len < 8 ? 15 : (o.snapDeg ?? 3.5)) * DEG) return { ...s, dx: Math.cos(base), dy: Math.sin(base) };
     }
     return s;
   };
@@ -759,11 +935,22 @@ export function extractStrokes(m, w, h, o = {}) {
         if (same && off < 1.6) {
           const len = A.len + Bq.len;
           const keep = A.len >= Bq.len ? A : Bq; // 긴 쪽 방향을 따른다
-          L.splice(k, 2, { ...A, dx: keep.dx, dy: keep.dy, b: Bq.b, mx: (A.mx * A.len + Bq.mx * Bq.len) / len, my: (A.my * A.len + Bq.my * Bq.len) / len, len });
+          L.splice(k, 2, { ...A, dx: keep.dx, dy: keep.dy, b: Bq.b, pb: Bq.pb, mx: (A.mx * A.len + Bq.mx * Bq.len) / len, my: (A.my * A.len + Bq.my * Bq.len) / len, len });
         }
       }
+      for (const l of L) { l.pa = pc[l.a]; l.pb = pc[l.b]; }
       return { curvy, p: pc, L };
     });
+    // 짧은 직선 조각이 두 직선 사이에 끼어 있으면(모따기처럼 보이는 둥근 모서리) 한 조각으로 합쳐 원호 처리 대상으로
+    for (let k = parts.length - 2; k >= 1; k--) {
+      const A = parts[k - 1], M = parts[k], Bp = parts[k + 1];
+      if (!A || !M || !Bp) continue;
+      if (A.curvy || M.curvy || Bp.curvy) continue;
+      const ml = M.L.reduce((t, l) => t + l.len, 0);
+      if (ml >= 16) continue;
+      parts.splice(k - 1, 3, { curvy: false, p: A.p.concat(M.p, Bp.p), L: A.L.concat(M.L, Bp.L), merged: true });
+      k = Math.min(k, parts.length - 1);
+    }
     prepared.push({ p, parts, width, peak });
   }
   consolidateLines(prepared.flatMap((it) => it.parts.filter((pt) => !pt.curvy).flatMap((pt) => pt.L)));
@@ -780,31 +967,33 @@ export function extractStrokes(m, w, h, o = {}) {
         const n = q.length - 1;
         const t1 = norm2(q[Math.min(2, n)][0] - q[0][0], q[Math.min(2, n)][1] - q[0][1]);
         const t2 = norm2(q[Math.max(0, n - 2)][0] - q[n][0], q[Math.max(0, n - 2)][1] - q[n][1]);
-        if (n >= 2) fitCubic(q, t1, t2, o.curveTol ?? 0.6, out); else out.push({ t: 'L', x: q[n][0], y: q[n][1] });
+        const arc = n >= 6 ? arcFit(q) : null;
+        if (arc) out.push(...arc.segs);
+        else if (n >= 2) fitCubic(q, t1, t2, o.curveTol ?? 0.6, out); else out.push({ t: 'L', x: q[n][0], y: q[n][1] });
         cur = q[n];
         return;
       }
       const L = pt.L, P = pt.p;
       // 시작점: 앞 조각이 직선이면 교점, 아니면 투영
-      if (!start) lineTo(proj(L[0], P[L[0].a]));
+      if (!start) lineTo(proj(L[0], L[0].pa));
       else if (prev && !prev.curvy) { /* 교점은 앞 조각 끝에서 이미 찍음 */ }
       else lineTo(proj(L[0], cur));
       for (let j = 0; j < L.length - 1; j++) {
         // 둥근 모서리: 긴 직선 사이에 낀 짧은 조각들(합쳐 14px 미만) → 두 직선에 접하는 원호
         let t = j + 1, shortLen = 0;
-        while (t < L.length && L[t].len < 7 && shortLen + L[t].len < 14) { shortLen += L[t].len; t++; }
+        while (t < L.length && L[t].len < 13 && shortLen + L[t].len < 20) { shortLen += L[t].len; t++; }
         const G2 = L[t];
         if (t > j + 1 && G2 && L[j].len >= 6 && G2.len >= 6) {
           const turnAll = Math.abs(Math.atan2(L[j].dx * G2.dy - L[j].dy * G2.dx, L[j].dx * G2.dx + L[j].dy * G2.dy));
           const X = intersect(L[j], G2);
           if (turnAll > 50 * DEG && turnAll < 150 * DEG && X) {
-            const p1 = proj(L[j], P[L[j + 1].a]), p2 = proj(G2, P[L[t - 1].b]);
+            const p1 = proj(L[j], L[j + 1].pa), p2 = proj(G2, L[t - 1].pb);
             const d = (dist2(X, p1) + dist2(X, p2)) / 2;
             // 원래 점들이 꼭짓점 가까이를 지나가면 각진 모서리(흐림 때문에 생긴 짧은 조각일 뿐)
             let dmin = Infinity;
-            for (let q = L[j + 1].a; q <= L[t - 1].b; q++) dmin = Math.min(dmin, dist2(P[q], X));
+            for (let q = j + 1; q < t; q++) { dmin = Math.min(dmin, dist2(L[q].pa, X), dist2(L[q].pb, X)); const mid = [(L[q].pa[0] + L[q].pb[0]) / 2, (L[q].pa[1] + L[q].pb[1]) / 2]; dmin = Math.min(dmin, dist2(mid, X)); }
             if (dmin < 1.1) { lineTo(X); cur = X; j = t - 1; continue; }
-            if (d < 8) {
+            if (d < 14) {
               const a1 = [X[0] - L[j].dx * d, X[1] - L[j].dy * d], a2 = [X[0] + G2.dx * d, X[1] + G2.dy * d];
               // 원호 근사 핸들 길이: r·(4/3)·tan(θ/4), r = d / tan(θ/2)
               const r = d / Math.tan(turnAll / 2), k2 = (4 / 3) * Math.tan(turnAll / 4) * r;
@@ -816,14 +1005,14 @@ export function extractStrokes(m, w, h, o = {}) {
             }
           }
         }
-        const X = intersect(L[j], L[j + 1]), e = P[L[j].b];
+        const X = intersect(L[j], L[j + 1]), e = L[j].pb;
         if (X && dist2(X, e) < 3) lineTo(X); else { lineTo(proj(L[j], e)); lineTo(proj(L[j + 1], e)); }
       }
       const last = L[L.length - 1];
       if (next && !next.curvy) {
-        const X = intersect(last, next.L[0]), e = P[P.length - 1];
+        const X = intersect(last, next.L[0]), e = last.pb;
         if (X && dist2(X, e) < 4) lineTo(X); else { lineTo(proj(last, e)); lineTo(proj(next.L[0], e)); }
-      } else lineTo(proj(last, P[last.b]));
+      } else lineTo(proj(last, last.pb));
     });
     if (!start || !out.length) continue;
     strokes.push({ start, segs: out, width, peak, closed: dist2(p[0], p[p.length - 1]) < 0.5 && p.length > 4 });
@@ -843,10 +1032,32 @@ export function extractStrokes(m, w, h, o = {}) {
       if (xx >= 0 && yy >= 0 && xx < w && yy < h && fillB[yy * w + xx]) { fillMask[i] = m[i]; break; }
     }
   }
+  // 닫힌(또는 거의 닫힌) 원형 선은 정확한 원으로
+  for (const st of strokes) {
+    const pts = [st.start, ...st.segs.map((g) => [g.x, g.y])];
+    if (pts.length < 5) continue;
+    const closedish = st.closed || dist2(pts[0], pts[pts.length - 1]) < 3;
+    if (!closedish) continue;
+    const xs = pts.map((q) => q[0]), ys = pts.map((q) => q[1]);
+    let cx = 0, cy = 0; for (const q of pts) { cx += q[0]; cy += q[1]; } cx /= pts.length; cy /= pts.length;
+    const rs = pts.map((q) => Math.hypot(q[0] - cx, q[1] - cy)), r = rs.reduce((a, b) => a + b, 0) / rs.length;
+    if (r < 2 || r > 60 || Math.max(...rs.map((v) => Math.abs(v - r))) > Math.max(0.8, r * 0.12)) continue;
+    void xs; void ys;
+    const k = 0.5523 * r;
+    st.start = [cx + r, cy];
+    st.segs = [
+      { t: 'C', x1: cx + r, y1: cy + k, x2: cx + k, y2: cy + r, x: cx, y: cy + r },
+      { t: 'C', x1: cx - k, y1: cy + r, x2: cx - r, y2: cy + k, x: cx - r, y: cy },
+      { t: 'C', x1: cx - r, y1: cy - k, x2: cx - k, y2: cy - r, x: cx, y: cy - r },
+      { t: 'C', x1: cx + k, y1: cy - r, x2: cx + r, y2: cy - k, x: cx + r, y: cy },
+    ];
+    st.closed = true;
+  }
+  weldEnds(strokes, 6);
   for (const d of dashes) {
     let s1 = snap({ dx: d.ux, dy: d.uy, mx: d.cx, my: d.cy });
     const hl = d.len / 2;
-    strokes.push({ start: [d.cx - s1.dx * hl, d.cy - s1.dy * hl], segs: [{ t: 'L', x: d.cx + s1.dx * hl, y: d.cy + s1.dy * hl }], width: d.width, peak: 1, closed: false, cap: 'butt', fixedWidth: true });
+    strokes.push({ start: [d.cx - s1.dx * hl, d.cy - s1.dy * hl], segs: [{ t: 'L', x: d.cx + s1.dx * hl, y: d.cy + s1.dy * hl }], width: Math.min(d.width, 2.2), peak: 1, closed: false, cap: 'butt' });
   }
   return { strokes, fillMask };
 }
