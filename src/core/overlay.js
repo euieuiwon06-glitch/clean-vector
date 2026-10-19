@@ -110,6 +110,71 @@ function fillHoles(mask, w, h, maxArea) {
   for (let i = 0; i < w * h; i++) if (out[i]) mask[i] = 1;
 }
 
+// 그래픽 아래 바닥의 그림자 추정: 그래픽이 아닌 주변 픽셀의 밝기를 여러 반경으로 평균 내서,
+// 주변 정보가 충분한 가장 작은 반경 값을 쓴다(가장자리는 세밀하게, 안쪽은 부드럽게 이어짐).
+// 결과는 햇빛 받는 바닥 밝기 대비 비율(1 = 그림자 없음).
+function synthShadow(L, amax, mask, w, h, b) {
+  const pad = 100;
+  const X0 = Math.max(0, b.x0 - pad), Y0 = Math.max(0, b.y0 - pad), X1 = Math.min(w - 1, b.x1 + pad), Y1 = Math.min(h - 1, b.y1 + pad);
+  const RW = X1 - X0 + 1, RH = Y1 - Y0 + 1;
+  const SL = new Float64Array((RW + 1) * (RH + 1)), SV = new Float64Array((RW + 1) * (RH + 1));
+  for (let y = 0; y < RH; y++) {
+    let rl = 0, rv = 0;
+    for (let x = 0; x < RW; x++) {
+      const i = (Y0 + y) * w + X0 + x;
+      const ok = amax[i] < 0.03 ? 1 : 0;
+      rl += ok * L[i]; rv += ok;
+      SL[(y + 1) * (RW + 1) + x + 1] = SL[y * (RW + 1) + x + 1] + rl;
+      SV[(y + 1) * (RW + 1) + x + 1] = SV[y * (RW + 1) + x + 1] + rv;
+    }
+  }
+  const box = (S, x, y, r) => {
+    const xa = Math.max(0, x - r), ya = Math.max(0, y - r), xb = Math.min(RW, x + r + 1), yb = Math.min(RH, y + r + 1);
+    return S[yb * (RW + 1) + xb] - S[ya * (RW + 1) + xb] - S[yb * (RW + 1) + xa] + S[ya * (RW + 1) + xa];
+  };
+  // 바닥의 그림자 무늬 = 바닥 밝기 ÷ 넓은 범위 바닥 평균(재질의 원래 밝기는 상쇄).
+  // 그래픽 밖에서 이 값을 구해, 그래픽 안쪽으로 양파 껍질처럼 이어 그린다. 어둡게만 한다(빛번짐 없음).
+  const bw = b.x1 - b.x0 + 1, bh = b.y1 - b.y0 + 1;
+  const field = new Float32Array(bw * bh).fill(1), known = new Uint8Array(bw * bh);
+  for (let y = 0; y < bh; y++) for (let x = 0; x < bw; x++) {
+    const gi = (b.y0 + y) * w + b.x0 + x, j = y * bw + x;
+    if (amax[gi] >= 0.03) continue; // 그래픽 위: 모름
+    const rx = b.x0 + x - X0, ry = b.y0 + y - Y0;
+    const c1 = box(SV, rx, ry, 1), wc = box(SV, rx, ry, 90);
+    if (!c1 || wc < 50) continue;
+    const r = (box(SL, rx, ry, 1) / c1) / Math.max(1, box(SL, rx, ry, 90) / wc);
+    field[j] = Math.max(0.3, Math.min(1, r));
+    known[j] = 1;
+  }
+  for (let j = 0; j < bw * bh; j++) {
+    const gi = (b.y0 + ((j / bw) | 0)) * w + b.x0 + (j % bw);
+    if (!known[j] && mask[gi] < 0.02 && amax[gi] >= 0.03) known[j] = 3; // 다른 그래픽 위: 무시
+  }
+  const wasKnown = known.slice();
+  onionFill(field, known, bw, bh, 1);
+  // 이어 그린 부분은 줄무늬가 생기므로 더 넓게 펴고, 원래 바닥 쪽 값은 그대로 둔다
+  const soft = blurField(blurField(field, bw, bh, 4), bw, bh, 4);
+  const out = new Float32Array(bw * bh);
+  for (let j = 0; j < bw * bh; j++) out[j] = wasKnown[j] === 1 ? field[j] : soft[j];
+  // 반경이 바뀌는 곳의 계단을 부드럽게
+  return blurField(out, bw, bh, 2);
+}
+
+function blurField(f, w, h, r) {
+  const tmp = new Float32Array(w * h), out = new Float32Array(w * h);
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    let s = 0, c = 0;
+    for (let k = Math.max(0, x - r); k <= Math.min(w - 1, x + r); k++) { s += f[y * w + k]; c++; }
+    tmp[y * w + x] = s / c;
+  }
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    let s = 0, c = 0;
+    for (let k = Math.max(0, y - r); k <= Math.min(h - 1, y + r); k++) { s += tmp[k * w + x]; c++; }
+    out[y * w + x] = s / c;
+  }
+  return out;
+}
+
 // 이진 마스크를 r px만큼 넓힌다(가로·세로 누적합)
 function dilate(m, w, h, r) {
   const tmp = new Uint8Array(w * h), out = new Uint8Array(w * h);
@@ -198,7 +263,13 @@ export function traceOverlay(input, opts = {}, progress = () => {}) {
   const v = vectorize(masks.map((mask, k) => ({ color: hex(targets[k]), mask })), w, h, { ...o, strokes: false }, progress);
 
   // 그림자·반사광 레이어
-  progress('그림자 추출', 0.9);
+  // 1) 그래픽에 원래 명암이 있으면 원본에서 뽑는다(그늘진 곳도 포함하도록 마스크 0.5 이상의 안쪽 기준)
+  // 2) 그래픽이 평평하게 합성돼 있으면 주변 바닥의 그림자 무늬를 그래픽 아래로 이어서 새로 입힌다
+  progress('그림자', 0.9);
+  const amaxAll = new Float32Array(w * h);
+  for (const m of masks) for (let i = 0; i < w * h; i++) if (m[i] > amaxAll[i]) amaxAll[i] = m[i];
+  const L = new Float32Array(w * h);
+  for (let i = 0; i < w * h; i++) L[i] = lum(data[i * 4], data[i * 4 + 1], data[i * 4 + 2]);
   const shades = [];
   if (o.shading) {
     masks.forEach((mask, k) => {
@@ -206,25 +277,54 @@ export function traceOverlay(input, opts = {}, progress = () => {}) {
       if (!b) { shades.push(null); return; }
       const bw = b.x1 - b.x0 + 1, bh = b.y1 - b.y0 + 1;
       const t = targets[k], Yt = Math.max(1, lum(...t));
-      const val = new Float32Array(bw * bh), known = new Uint8Array(bw * bh);
+      const solid = new Uint8Array(bw * bh), outside = new Uint8Array(bw * bh);
       for (let y = 0; y < bh; y++) for (let x = 0; x < bw; x++) {
         const i = (b.y0 + y) * w + b.x0 + x;
-        if (mask[i] > 0.92) {
-          val[y * bw + x] = lum(data[i * 4], data[i * 4 + 1], data[i * 4 + 2]) / Yt;
-          known[y * bw + x] = 1;
-        } else if (mask[i] < 0.02) known[y * bw + x] = 3; // 그래픽 밖: 채울 필요 없음
+        solid[y * bw + x] = mask[i] >= 0.5 ? 1 : 0;
+        outside[y * bw + x] = mask[i] >= 0.5 ? 0 : 1;
       }
+      const nearOut = dilate(outside, bw, bh, 2); // 가장자리 2px은 배경과 섞여 있어 제외
+      const val = new Float32Array(bw * bh), known = new Uint8Array(bw * bh);
+      let n = 0, sum = 0, sum2 = 0;
+      for (let y = 0; y < bh; y++) for (let x = 0; x < bw; x++) {
+        const j = y * bw + x, i = (b.y0 + y) * w + b.x0 + x;
+        if (solid[j] && !nearOut[j]) {
+          const r = L[i] / Yt;
+          val[j] = r; known[j] = 1;
+          n++; sum += r; sum2 += r * r;
+        } else if (mask[i] < 0.02) known[j] = 3;
+      }
+      const mean = n ? sum / n : 1;
+      const sd = n ? Math.sqrt(Math.max(0, sum2 / n - mean * mean)) : 0;
+      // 주변 바닥(그래픽 밖 60px 이내)의 상대 명암 편차
+      let fn = 0, fs = 0, fs2 = 0;
+      for (let y = Math.max(0, b.y0 - 60); y <= Math.min(h - 1, b.y1 + 60); y += 2) {
+        for (let x = Math.max(0, b.x0 - 60); x <= Math.min(w - 1, b.x1 + 60); x += 2) {
+          const i = y * w + x;
+          if (amaxAll[i] >= 0.03) continue;
+          fn++; fs += L[i]; fs2 += L[i] * L[i];
+        }
+      }
+      const fmean = fn ? fs / fn : 1;
+      const fsd = fn ? Math.sqrt(Math.max(0, fs2 / fn - fmean * fmean)) / Math.max(1, fmean) : 0;
+      const relSd = sd / Math.max(mean, 0.01);
+      // 바닥은 명암이 뚜렷한데 그래픽만 평평하면 = 그림자 없이 합성된 그래픽 → 그림자를 만들어 입힌다
+      // 그래픽 자체에 명암이 있으면(원래 그림자가 합성돼 있음) 원본 명암을 그대로 쓰고,
+      // 평평하게 얹혀 있으면 주변 바닥의 그림자 무늬를 그래픽 아래로 이어서 만든다.
       onionFill(val, known, bw, bh, 1);
-      const mul = new Uint8Array(bw * bh), scr = new Uint8Array(bw * bh);
+      let mulVals = val;
+      const synth = relSd < 0.12 && fsd > 0.15;
+      if (synth) mulVals = synthShadow(L, amaxAll, mask, w, h, b);      const mul = new Uint8Array(bw * bh), scr = new Uint8Array(bw * bh);
       let anyMul = false, anyScr = false;
       const st = o.shadeStrength;
       for (let i = 0; i < bw * bh; i++) {
-        const r = val[i];
+        const r = mulVals[i];
         if (r < 1) { mul[i] = Math.round(255 * (1 - (1 - r) * st)); if (mul[i] < 250) anyMul = true; }
         else mul[i] = 255;
-        if (r > 1) { const s = Math.min(1, ((r - 1) * Yt) / (255 - Yt)) * st; scr[i] = Math.round(255 * s); if (scr[i] > 5) anyScr = true; }
+        if (r > 1) { const s2 = Math.min(1, ((r - 1) * Yt) / (255 - Yt)) * st; scr[i] = Math.round(255 * s2); if (scr[i] > 5) anyScr = true; }
       }
-      shades.push({ x: b.x0, y: b.y0, w: bw, h: bh, mul: anyMul ? mul : null, scr: anyScr ? scr : null });
+      if (o.debug) console.log('shade', hex(t), 'n', n, 'mean', mean.toFixed(3), 'sd', relSd.toFixed(3), 'floor sd', fsd.toFixed(3), 'synth', synth, 'mul', anyMul);
+      shades.push({ x: b.x0, y: b.y0, w: bw, h: bh, mul: anyMul ? mul : null, scr: anyScr ? scr : null, synthetic: synth });
     });
   }
 
