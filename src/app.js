@@ -156,7 +156,7 @@ function drawAnchors() {
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.clearRect(0, 0, r.width, r.height);
   if (view !== 'path' || !result) return;
-  const accent = getComputedStyle(document.documentElement).getPropertyValue('--accent').trim() || '#0a7cff';
+  const accent = getComputedStyle(document.documentElement).getPropertyValue('--accent').trim() || '#111';
   const inView = (x, y) => x > -8 && y > -8 && x < r.width + 8 && y < r.height + 8;
   if (Z >= 1.5) {
     const h = result.handles;

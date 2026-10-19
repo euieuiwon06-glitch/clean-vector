@@ -1,4 +1,5 @@
 import { compositeOnWhite, buildPalette, unmix, denoise } from './palette.js';
+import { extractStrokes, inkCoverage } from './strokes.js';
 import { maskBounds, upsample, gaussianBlur, preserveThin, marchingSquares } from './contour.js';
 import { resampleClosed, analyzeContour, alignRuns, equalizeStrokes, buildPath } from './fit.js';
 
@@ -86,6 +87,28 @@ function detectPhotos(img, pb) {
   return rects;
 }
 
+// 무채색(회색)이면서 가장 진한 색도 배경도 아니고, 5x5가 모두 그 색인 "면 속" 픽셀이 거의 없는 색을 뺀다
+function pruneLineGrays(img, palette, um) {
+  const { width: w, height: h } = img;
+  const { label, bg } = um;
+  const K = palette.length;
+  const chroma = (c) => Math.max(...c) - Math.min(...c);
+  const lumc = (c) => 0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2];
+  let ink = -1;
+  for (let k = 0; k < K; k++) if (k !== bg && chroma(palette[k]) < 28 && (ink < 0 || lumc(palette[k]) < lumc(palette[ink]))) ink = k;
+  if (ink < 0) return palette;
+  const interior = new Float64Array(K);
+  for (let y = 2; y < h - 2; y += 2) for (let x = 2; x < w - 2; x += 2) {
+    const l = label[y * w + x];
+    if (l < 0) continue;
+    let same = true;
+    for (let dy = -2; dy <= 2 && same; dy++) for (let dx = -2; dx <= 2; dx++) if (label[(y + dy) * w + x + dx] !== l) { same = false; break; }
+    if (same) interior[l]++;
+  }
+  const total = (w * h) / 4;
+  return palette.filter((c, k) => k === bg || k === ink || chroma(c) >= 28 || interior[k] > total * 0.004);
+}
+
 export function trace(input, opts = {}, progress = () => {}) {
   const o = { ...DEFAULTS, ...opts };
   const t0 = Date.now();
@@ -109,6 +132,11 @@ export function trace(input, opts = {}, progress = () => {}) {
       um = unmix(img, palette);
     }
   }
+  // 선 사이 회색 정리: 넓은 면이 없는 중간 회색은 "검정 선이 덜 덮인 픽셀"이므로 대표색에서 뺀다.
+  {
+    const keep = pruneLineGrays(img, palette, um);
+    if (keep.length < palette.length) { palette = keep; um = unmix(img, palette); }
+  }
   const { masks, bg, counts } = um;
   for (const r of photos) for (const m of masks) for (let y = r.y; y < r.y + r.h; y++) m.fill(0, y * w + r.x, y * w + r.x + r.w);
 
@@ -118,6 +146,9 @@ export function trace(input, opts = {}, progress = () => {}) {
   const B0 = palette[bg];
   const dist = (c) => Math.hypot(c[0] - B0[0], c[1] - B0[1], c[2] - B0[2]);
   const order = palette.map((_, i) => i).filter((i) => i !== bg).sort((a, b) => dist(palette[a]) - dist(palette[b]));
+  const lumP = (c) => 0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2];
+  let inkC = -1;
+  for (const ci of order) { const c = palette[ci]; if (Math.max(...c) - Math.min(...c) < 28 && lumP(c) < 90 && (inkC < 0 || lumP(c) < lumP(palette[inkC]))) inkC = ci; }
   const stacked = order.map((ci) => {
     const pc = palette[ci];
     const parents = [];
@@ -131,23 +162,42 @@ export function trace(input, opts = {}, progress = () => {}) {
       const r = Math.hypot(pc[0] - B0[0] - vx * t, pc[1] - B0[1] - vy * t, pc[2] - B0[2] - vz * t);
       if (r < 30) parents.push({ m: masks[d] });
     }
-    if (!parents.length) return { color: hex(pc), mask: masks[ci] };
+    const isInk = ci === inkC;
+    if (!parents.length) return { color: hex(pc), mask: masks[ci], ink: isInk, rgb: pc };
     const m = new Float32Array(masks[ci]);
     for (let i = 0; i < m.length; i++) {
       let v = m[i];
       for (const p of parents) v += p.m[i]; // 진한 색의 경계는 그 색 레이어와 같게
       m[i] = v > 1 ? 1 : v;
     }
-    return { color: hex(pc), mask: m };
+    return { color: hex(pc), mask: m, ink: ci === inkC, rgb: pc };
   });
+  // 잉크(가장 진한 무채색)의 가는 선은 중심선 획으로, 두꺼운 부분만 면으로
+  let strokes = [];
+  const inkIdx = stacked.findIndex((it) => it.ink);
+  if (inkIdx >= 0 && o.centerline !== false) {
+    progress('선 추적', 0.1);
+    const ink = stacked[inkIdx];
+    const cov = inkCoverage(img, ink.rgb);
+    if (o.debugCov) o.debugCov(cov);
+    const r = extractStrokes(cov, w, h, { lineTol: 0.75, snapDeg: 3.5, binTh: 0.4 });
+    const bc = palette[bg], ic = ink.rgb;
+    strokes = r.strokes.map((st) => {
+      // 진한 선은 잉크색 하나로, 흐린 선만 몇 단계 회색으로
+      const pk = st.peak >= 0.7 ? 1 : Math.max(0.3, Math.round(st.peak * 5) / 5);
+      const col = ic.map((v, k) => Math.round(bc[k] + (v - bc[k]) * pk));
+      return { ...st, color: hex(col), width: Math.round(st.width * 4) / 4 };
+    });
+    stacked[inkIdx] = { ...ink, mask: r.fillMask };
+  }
   const v = vectorize(stacked, w, h, o, progress);
   progress('완료', 1);
   return {
     mode: 'graphic',
     width: w, height: h, hasAlpha: img.hasAlpha,
     background: hex(palette[bg]), palette: palette.map(hex),
-    layers: v.layers, photos,
-    stats: { ...v.stats, ms: Date.now() - t0 },
+    layers: v.layers, photos, strokes,
+    stats: { anchors: v.stats.anchors + strokes.reduce((n, st) => n + st.segs.length + 1, 0), paths: v.stats.paths + strokes.length, ms: Date.now() - t0 },
   };
 }
 
@@ -191,6 +241,12 @@ const f2 = (v) => {
   const s = (Math.round(v * 100) / 100).toString();
   return s === '-0' ? '0' : s;
 };
+
+export function openPathData(st) {
+  let d = `M${f2(st.start[0])} ${f2(st.start[1])}`;
+  for (const g of st.segs) d += g.t === 'L' ? `L${f2(g.x)} ${f2(g.y)}` : `C${f2(g.x1)} ${f2(g.y1)} ${f2(g.x2)} ${f2(g.y2)} ${f2(g.x)} ${f2(g.y)}`;
+  return st.closed ? d + 'Z' : d;
+}
 
 export function pathData(p) {
   if (p.circle) {
@@ -247,6 +303,20 @@ export function toSVG(res, { background = true, hrefs = {} } = {}) {
   for (const l of res.layers) {
     if (!l.paths.length) continue;
     out.push(`<path fill="${l.color}" fill-rule="evenodd" d="${l.paths.map(pathData).join('')}"/>`);
+  }
+  if (res.strokes?.length) {
+    const groups = new Map();
+    for (const st of res.strokes) {
+      const k = `${st.color}|${st.width}`;
+      if (!groups.has(k)) groups.set(k, []);
+      groups.get(k).push(openPathData(st));
+    }
+    out.push('<g id="lines" fill="none" stroke-linecap="round" stroke-linejoin="round">');
+    for (const [k, ds] of groups) {
+      const [c, wd] = k.split('|');
+      out.push(`<path stroke="${c}" stroke-width="${wd}" d="${ds.join('')}"/>`);
+    }
+    out.push('</g>');
   }
   out.push('</svg>');
   return out.join('\n');

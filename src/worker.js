@@ -37,6 +37,15 @@ function collectAnchors(res) {
       }
     }
   }
+  for (const st of res.strokes || []) {
+    let px = st.start[0], py = st.start[1];
+    pts.push(px, py);
+    for (const s of st.segs) {
+      if (s.t === 'C') hds.push(px, py, s.x1, s.y1, s.x, s.y, s.x2, s.y2);
+      pts.push(s.x, s.y);
+      px = s.x; py = s.y;
+    }
+  }
   return { anchors: new Float32Array(pts), handles: new Float32Array(hds) };
 }
 

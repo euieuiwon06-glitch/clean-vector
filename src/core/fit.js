@@ -507,7 +507,7 @@ function reparam(p, u, b) {
 
 const norm = (x, y) => { const l = Math.hypot(x, y) || 1; return [x / l, y / l]; };
 
-function fitCubic(p, t1, t2, tol, out, depth = 0) {
+export function fitCubic(p, t1, t2, tol, out, depth = 0) {
   const n = p.length;
   const p0 = p[0], p3 = p[n - 1];
   // 거의 직선이면 직선으로
