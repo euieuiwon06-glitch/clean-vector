@@ -1,7 +1,7 @@
-import { compositeOnWhite, buildPalette, unmix, denoise } from './palette.js?v=563ad31b';
-import { extractStrokes, inkCoverage } from './strokes.js?v=563ad31b';
-import { maskBounds, upsample, gaussianBlur, preserveThin, marchingSquares } from './contour.js?v=563ad31b';
-import { resampleClosed, analyzeContour, alignRuns, equalizeStrokes, buildPath } from './fit.js?v=563ad31b';
+import { compositeOnWhite, buildPalette, unmix, denoise } from './palette.js?v=02bfda52';
+import { extractStrokes, inkCoverage } from './strokes.js?v=02bfda52';
+import { maskBounds, upsample, gaussianBlur, preserveThin, marchingSquares } from './contour.js?v=02bfda52';
+import { resampleClosed, analyzeContour, alignRuns, equalizeStrokes, buildPath } from './fit.js?v=02bfda52';
 
 export const DEFAULTS = {
   colors: 'auto',   // 대표색 개수(숫자 또는 auto)
@@ -109,6 +109,48 @@ function pruneLineGrays(img, palette, um) {
   return palette.filter((c, k) => k === bg || k === ink || chroma(c) >= 28 || interior[k] > total * 0.004);
 }
 
+function boxMean(m, w, h, r) {
+  const t = new Float32Array(w * h), o = new Float32Array(w * h);
+  for (let y = 0; y < h; y++) { let acc = 0; for (let x = -r; x < w + r; x++) { if (x + r < w && x + r >= 0) acc += m[y * w + x + r]; if (x - r - 1 >= 0 && x - r - 1 < w) acc -= m[y * w + x - r - 1]; if (x >= 0 && x < w) t[y * w + x] = acc; } }
+  for (let x = 0; x < w; x++) { let acc = 0; for (let y = -r; y < h + r; y++) { if (y + r < h && y + r >= 0) acc += t[(y + r) * w + x]; if (y - r - 1 >= 0 && y - r - 1 < h) acc -= t[(y - r - 1) * w + x]; if (y >= 0 && y < h) o[y * w + x] = acc; } }
+  return o;
+}
+
+function fillUnderInk(items, cov, w, h) {
+  if (!items.length) return;
+  // 선 아래 픽셀은 주변(7x7)에서 잉크가 아닌 픽셀 중 가장 많은 색(배경 포함)으로 정한다.
+  // 초록과 흰 바탕 사이 선이면 경계가 선 한가운데에 오게 되어 어느 쪽으로도 색이 새지 않는다.
+  const near = items.map((it) => boxMean(it.mask, w, h, 3));
+  const nonInk = new Float32Array(w * h);
+  for (let i = 0; i < w * h; i++) nonInk[i] = 1 - Math.min(1, cov[i]);
+  const total = boxMean(nonInk, w, h, 3);
+  for (let i = 0; i < w * h; i++) {
+    const c = cov[i];
+    if (c < 0.03) continue;
+    let sum = 0, best = -1, bv = 0;
+    for (let k = 0; k < items.length; k++) { sum += near[k][i]; if (near[k][i] > bv) { bv = near[k][i]; best = k; } }
+    const bgv = total[i] - sum; // 배경색 몫
+    if (best < 0 || bv <= bgv || bv < 2) continue;
+    const m = items[best].mask;
+    m[i] = Math.min(1, m[i] + c);
+  }
+}
+
+function widthLevels(strokes) {
+  const ws = strokes.map((s) => [s.width, s.segs.length + 1]);
+  if (!ws.length) return [1];
+  let c = [1, 1.6];
+  for (let it = 0; it < 15; it++) {
+    const acc = c.map(() => [0, 0]);
+    for (const [v, wt] of ws) { let b = 0; for (let k = 1; k < c.length; k++) if (Math.abs(c[k] - v) < Math.abs(c[b] - v)) b = k; acc[b][0] += v * wt; acc[b][1] += wt; }
+    c = c.map((x, k) => (acc[k][1] ? acc[k][0] / acc[k][1] : x));
+  }
+  // 거의 같은 단계는 합치고 0.25 단위로
+  const out = [];
+  for (const x of c.sort((a, b) => a - b)) { const q = Math.round(x * 4) / 4; if (!out.length || q - out[out.length - 1] > 0.3) out.push(q); }
+  return out;
+}
+
 export function trace(input, opts = {}, progress = () => {}) {
   const o = { ...DEFAULTS, ...opts };
   const t0 = Date.now();
@@ -179,14 +221,19 @@ export function trace(input, opts = {}, progress = () => {}) {
     progress('선 추적', 0.1);
     const ink = stacked[inkIdx];
     const cov = inkCoverage(img, ink.rgb);
+    // 선 아래로 색 면을 이어 칠한다: 선을 빼도 초록 면에 구멍(흰 테두리)이 남지 않게
+    fillUnderInk(stacked.filter((it) => !it.ink), cov, w, h);
     if (o.debugCov) o.debugCov(cov);
     const r = extractStrokes(cov, w, h, { lineTol: 0.75, snapDeg: 3.5, binTh: 0.4 });
     const bc = palette[bg], ic = ink.rgb;
+    // 색은 검정·회색 두 가지, 굵기는 길이 가중 2~3단계로 통일
+    const gray = hex(ic.map((v, k) => Math.round(bc[k] + (v - bc[k]) * 0.5)));
+    // 흐림 때문에 재는 폭이 실제보다 굵게 나와 0.8배로 보정
+    for (const st of r.strokes) st.width *= 0.8;
+    const levels = widthLevels(r.strokes);
     strokes = r.strokes.map((st) => {
-      // 진한 선은 잉크색 하나로, 흐린 선만 몇 단계 회색으로
-      const pk = st.peak >= 0.7 ? 1 : Math.max(0.3, Math.round(st.peak * 5) / 5);
-      const col = ic.map((v, k) => Math.round(bc[k] + (v - bc[k]) * pk));
-      return { ...st, color: hex(col), width: Math.round(st.width * 4) / 4 };
+      const wq = levels.reduce((a, b) => (Math.abs(b - st.width) < Math.abs(a - st.width) ? b : a));
+      return { ...st, color: st.peak >= 0.5 ? ink.color : gray, width: wq };
     });
     stacked[inkIdx] = { ...ink, mask: r.fillMask };
   }
