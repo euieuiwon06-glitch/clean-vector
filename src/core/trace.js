@@ -1,7 +1,8 @@
-import { compositeOnWhite, buildPalette, unmix, denoise } from './palette.js?v=c6dbac93';
-import { extractStrokes, inkCoverage } from './strokes.js?v=c6dbac93';
-import { maskBounds, upsample, gaussianBlur, preserveThin, marchingSquares } from './contour.js?v=c6dbac93';
-import { resampleClosed, analyzeContour, alignRuns, equalizeStrokes, buildPath, fitCircle, snapConcentric } from './fit.js?v=c6dbac93';
+import { compositeOnWhite, buildPalette, unmix, denoise } from './palette.js?v=2f22beb2';
+import { unifyRepeats } from './repeat.js?v=2f22beb2';
+import { extractStrokes, inkCoverage } from './strokes.js?v=2f22beb2';
+import { maskBounds, upsample, gaussianBlur, preserveThin, marchingSquares } from './contour.js?v=2f22beb2';
+import { resampleClosed, analyzeContour, alignRuns, equalizeStrokes, buildPath, fitCircle, snapConcentric } from './fit.js?v=2f22beb2';
 
 export const DEFAULTS = {
   colors: 'auto',   // 대표색 개수(숫자 또는 auto)
@@ -417,7 +418,13 @@ function widthLevels(strokes) {
 export function trace(input, opts = {}, progress = () => {}) {
   const o = { ...DEFAULTS, ...opts };
   const t0 = Date.now();
-  let img = denoise(compositeOnWhite(input));
+  let img = compositeOnWhite(input);
+  // 반복 형태 통일: 비슷한 작은 물체는 겹쳐 만든 대표 모양으로 바꿔 넣는다(큰 창 → 작은 창 순)
+  if (o.unify === true) { // 실험 중: 기본 꺼짐
+    progress('반복 형태 찾기', 0.03);
+    for (const win of [40, 28]) img = unifyRepeats(img, { win }).img;
+  }
+  img = denoise(img);
   const { width: w, height: h } = img;
   progress('색 정리', 0.05);
   let palette = buildPalette(img, o.colors);
@@ -504,7 +511,15 @@ export function trace(input, opts = {}, progress = () => {}) {
     const levels = widthLevels(r.strokes.filter((st) => !st.fixedWidth));
     strokes = r.strokes.map((st) => {
       const wq = st.fixedWidth ? Math.round(st.width * 4) / 4 : levels.reduce((a, b) => (Math.abs(b - st.width) < Math.abs(a - st.width) ? b : a));
-      return { ...st, color: st.peak >= 0.5 ? ink.color : gray, width: wq };
+      const isGray = st.peak < 0.5;
+      // 흐린 선은 가장 가는 굵기로
+      return { ...st, color: isGray ? gray : ink.color, width: isGray ? levels[0] : wq, gray: isGray };
+    }).filter((st) => {
+      // 흐린 짧은 선(12px 미만)은 음영·잡티로 보고 버린다
+      if (!st.gray || st.closed) return true;
+      let p = st.start, L = 0;
+      for (const g of st.segs) { L += Math.hypot(g.x - p[0], g.y - p[1]); p = [g.x, g.y]; }
+      return L >= 12;
     });
     stacked[inkIdx] = { ...ink, mask: r.fillMask };
   }

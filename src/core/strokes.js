@@ -3,7 +3,7 @@
 // 2) 뼈대를 끝점·교차점 사이 선들로 나눠
 // 3) 직선은 그림의 주요 방향으로 정렬한 선분, 곡선은 매끈한 베지어로 맞추고
 // 4) 선마다 원본 단면에서 굵기·진하기를 재서 일정한 굵기의 획으로 만든다.
-import { fitCubic } from './fit.js?v=c6dbac93';
+import { fitCubic } from './fit.js?v=2f22beb2';
 
 const DEG = Math.PI / 180;
 
@@ -1029,7 +1029,20 @@ export function extractStrokes(m, w, h, o = {}) {
       }
       const shortCnt = segs.filter((sg) => sg.len < 5).length;
       const curvy = segs.length >= 3 && (shortCnt / segs.length > 0.5 || Math.max(...turns) < 25 * DEG);
-      if (curvy) return { curvy, p: pc };
+      // 거의 곧은 곡선(현에서 벗어남이 작음)은 흐림 때문에 흔들린 직선으로 보고 편다
+      if (curvy) {
+        const a0 = pc[0], a1 = pc[pc.length - 1], cl = dist2(a0, a1);
+        let dev = 0;
+        if (cl > 1e-6) for (const q of pc) dev = Math.max(dev, Math.abs((q[0] - a0[0]) * (a1[1] - a0[1]) - (q[1] - a0[1]) * (a1[0] - a0[0])) / cl);
+        if (cl > 3 && dev < Math.max(1.3, cl * 0.09)) {
+          const Lf = fitLine(pc, 0, pc.length - 1);
+          if ((a1[0] - a0[0]) * Lf.dx + (a1[1] - a0[1]) * Lf.dy < 0) { Lf.dx = -Lf.dx; Lf.dy = -Lf.dy; }
+          const L1 = [snap({ a: 0, b: pc.length - 1, ...Lf, len: cl, pa: a0, pb: a1 })];
+          L1[0].pa = a0; L1[0].pb = a1;
+          return { curvy: false, p: pc, L: L1 };
+        }
+        return { curvy, p: pc };
+      }
       const L = segs.map(snap);
       for (let k = L.length - 2; k >= 0; k--) {
         const A = L[k], Bq = L[k + 1];
