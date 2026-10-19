@@ -3,7 +3,7 @@ const $ = (s) => document.querySelector(s);
 const stage = $('#stage'), world = $('#world'), orig = $('#orig'), vec = $('#vec'), outline = $('#outline');
 const cvs = $('#anchors'), wipe = $('#wipe');
 let image = null, fileName = 'vector', result = null;
-let view = 'vec', Z = 1, TX = 0, TY = 0, wipeX = 0.5;
+let view = 'vec', Z = 1, TX = 0, TY = 0, wipeX = 0.5, fitZ = 1;
 
 function seg(id, onChange) {
   const root = $(id);
@@ -109,13 +109,14 @@ function flash(sel, text) {
 function fit() {
   if (!image) return;
   const r = stage.getBoundingClientRect();
-  Z = Math.min((r.width - 48) / image.width, (r.height - 48) / image.height);
+  Z = fitZ = Math.min((r.width - 48) / image.width, (r.height - 48) / image.height);
   TX = (r.width - image.width * Z) / 2;
   TY = (r.height - image.height * Z) / 2;
   layout();
 }
 function zoomAt(f, cx, cy) {
-  const nz = Math.min(64, Math.max(0.05, Z * f));
+  const nz = Math.min(Math.max(16, fitZ * 8), Math.max(fitZ, Z * f));
+  if (nz === Z) return;
   TX = cx - (cx - TX) * (nz / Z);
   TY = cy - (cy - TY) * (nz / Z);
   Z = nz;
@@ -186,7 +187,8 @@ stage.addEventListener('wheel', (e) => {
   e.preventDefault();
   const r = stage.getBoundingClientRect();
   if (e.ctrlKey || e.metaKey || Math.abs(e.deltaY) > 0 && !e.shiftKey && Math.abs(e.deltaX) < 1) {
-    zoomAt(Math.exp(-e.deltaY * (e.ctrlKey ? 0.01 : 0.0018)), e.clientX - r.left, e.clientY - r.top);
+    const d = Math.max(-100, Math.min(100, e.deltaMode === 1 ? e.deltaY * 33 : e.deltaY));
+    zoomAt(Math.exp(-d * (e.ctrlKey ? 0.006 : 0.0012)), e.clientX - r.left, e.clientY - r.top);
   } else { TX -= e.deltaX; TY -= e.deltaY; layout(); }
 }, { passive: false });
 
