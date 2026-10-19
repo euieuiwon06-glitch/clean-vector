@@ -3,7 +3,7 @@
 // 2) 뼈대를 끝점·교차점 사이 선들로 나눠
 // 3) 직선은 그림의 주요 방향으로 정렬한 선분, 곡선은 매끈한 베지어로 맞추고
 // 4) 선마다 원본 단면에서 굵기·진하기를 재서 일정한 굵기의 획으로 만든다.
-import { fitCubic } from './fit.js?v=afd93cf8';
+import { fitCubic } from './fit.js?v=8e72d564';
 
 const DEG = Math.PI / 180;
 
@@ -159,7 +159,7 @@ function traceSkeleton(S, w, h) {
 function joinPaths(paths, deg, w) {
   const isEnd = (i) => deg[i] <= 1;
   // 한쪽이 끝점이고 짧은 선 = 모서리에 생긴 가지
-  let P = paths.filter((p) => p.length >= 2 && !(p.length <= 5 && (isEnd(p[0]) !== isEnd(p[p.length - 1]))));
+  let P = paths.filter((p) => p.length >= 2 && !(p.length <= 12 && (isEnd(p[0]) !== isEnd(p[p.length - 1]))));
   const xy = (i) => [i % w, (i / w) | 0];
   // 끝에서 몇 픽셀 안쪽 방향(교차점에서 선 쪽으로)
   const dirAt = (p, atStart) => {
@@ -320,10 +320,17 @@ function extendEnds(paths, maxExt) {
         if (Math.abs(den) < 0.2) continue; // 거의 평행
         const t = ((a[0] - e.pt[0]) * sy - (a[1] - e.pt[1]) * sx) / den;
         const u = ((a[0] - e.pt[0]) * e.d[1] - (a[1] - e.pt[1]) * e.d[0]) / den;
-        if (t < -0.3 || t > maxExt || u < -0.05 || u > 1.05) continue;
-        if (t < bestT) { bestT = t; hit = [e.pt[0] + e.d[0] * t, e.pt[1] + e.d[1] * t]; }
+        if (t < -2.5 || t > maxExt || u < -0.05 || u > 1.05) continue;
+        // 앞쪽(틈)과 뒤쪽(삐져나감) 중 끝에서 가장 가까운 교차
+        if (Math.abs(t) < Math.abs(bestT)) { bestT = t; hit = [e.pt[0] + e.d[0] * t, e.pt[1] + e.d[1] * t]; }
       }
       if (hit && bestT > 0.05) { if (st) q.unshift(hit); else q.push(hit); }
+      else if (hit && bestT < -0.4) {
+        // 다른 선을 지나 조금 삐져나간 끝: 교차점에서 자른다
+        const cut = -bestT;
+        if (st) { while (q.length > 2 && dist2(q[0], e.pt) < cut) q.shift(); q.unshift(hit); }
+        else { while (q.length > 2 && dist2(q[q.length - 1], e.pt) < cut) q.pop(); q.push(hit); }
+      }
     }
     return q;
   });
@@ -353,6 +360,37 @@ function fitDash(px, m, w, h) {
     if (Math.abs(dx * -uy + dy * ux) > wid / 2 + 0.9) return null;
   }
   return { cx: mx, cy: my, ux, uy, len, width: wid };
+}
+
+// 전체 직선 정렬: 같은 각도이고 옆으로 1.3px 안에 있는 직선들은 한 줄 위에 놓는다(겹침·계단 제거)
+function consolidateLines(lines) {
+  const groups = new Map();
+  for (const L of lines) {
+    let a = Math.atan2(L.dy, L.dx) / DEG;
+    a = ((a % 180) + 180) % 180;
+    const key = Math.round(a * 2) / 2 % 180;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(L);
+  }
+  for (const [key, arr] of groups) {
+    const nx = -Math.sin(key * DEG), ny = Math.cos(key * DEG);
+    const items = arr.map((L) => ({ L, off: L.mx * nx + L.my * ny })).sort((a, b) => a.off - b.off);
+    let cl = [];
+    const flush = () => {
+      if (cl.length > 1) {
+        let sw = 0, so = 0;
+        for (const it of cl) { sw += it.L.len; so += it.off * it.L.len; }
+        const target = so / sw;
+        for (const it of cl) { const d = target - it.off; it.L.mx += nx * d; it.L.my += ny * d; }
+      }
+      cl = [];
+    };
+    for (const it of items) {
+      if (cl.length && (it.off - cl[0].off > 1.3)) flush();
+      cl.push(it);
+    }
+    flush();
+  }
 }
 
 // 선 끝 펴기: 끝 2.5px 안에서 안쪽 직선(끝에서 2~8px 구간)을 벗어나 굽은 점은 그 직선 위로 옮긴다.
@@ -663,11 +701,12 @@ export function extractStrokes(m, w, h, o = {}) {
   const proj = (s, pt) => { const t = (pt[0] - s.mx) * s.dx + (pt[1] - s.my) * s.dy; return [s.mx + s.dx * t, s.my + s.dy * t]; };
 
   const strokes = [];
+  const prepared = [];
   for (const { p, pieces } of items) {
     if (!pieces.length) continue;
     let total = 0;
     for (const pc of pieces) for (const sg of pc.segs) total += sg.len;
-    if (total < 1.2) continue;
+    if (total < 3) continue; // 짧은 부스러기·잔가지
     // 굵기·진하기: 법선 방향 단면
     let wsum = 0, psum = 0, cnt = 0;
     const ws = [];
@@ -714,15 +753,21 @@ export function extractStrokes(m, w, h, o = {}) {
       const L = segs.map(snap);
       for (let k = L.length - 2; k >= 0; k--) {
         const A = L[k], Bq = L[k + 1];
-        const same = Math.abs(A.dx * Bq.dy - A.dy * Bq.dx) < Math.sin(1.5 * DEG) && A.dx * Bq.dx + A.dy * Bq.dy > 0;
+        // 거의 같은 방향(8° 이내)으로 살짝 꺾이거나 어긋난 직선은 원본 왜곡으로 보고 하나로 편다
+        const same = Math.abs(A.dx * Bq.dy - A.dy * Bq.dx) < Math.sin(8 * DEG) && A.dx * Bq.dx + A.dy * Bq.dy > 0;
         const off = Math.abs((Bq.mx - A.mx) * -A.dy + (Bq.my - A.my) * A.dx);
-        if (same && off < 0.8) {
+        if (same && off < 1.6) {
           const len = A.len + Bq.len;
-          L.splice(k, 2, { ...A, b: Bq.b, mx: (A.mx * A.len + Bq.mx * Bq.len) / len, my: (A.my * A.len + Bq.my * Bq.len) / len, len });
+          const keep = A.len >= Bq.len ? A : Bq; // 긴 쪽 방향을 따른다
+          L.splice(k, 2, { ...A, dx: keep.dx, dy: keep.dy, b: Bq.b, mx: (A.mx * A.len + Bq.mx * Bq.len) / len, my: (A.my * A.len + Bq.my * Bq.len) / len, len });
         }
       }
       return { curvy, p: pc, L };
     });
+    prepared.push({ p, parts, width, peak });
+  }
+  consolidateLines(prepared.flatMap((it) => it.parts.filter((pt) => !pt.curvy).flatMap((pt) => pt.L)));
+  for (const { p, parts, width, peak } of prepared) {
     // 이어 붙이기: 직선끼리 만나는 곳은 두 직선의 교점(날카로운 코너)
     const out = [];
     let start = null, cur = null;

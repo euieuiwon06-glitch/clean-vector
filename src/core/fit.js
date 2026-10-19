@@ -34,7 +34,7 @@ export function resampleClosed(raw, step) {
   return { xs, ys, n: m, area: Math.abs(area) / 2, length: L };
 }
 
-function fitCircle(xs, ys, n) {
+export function fitCircle(xs, ys, n) {
   // Kasa 대수 원 맞춤
   let sx = 0, sy = 0, sxx = 0, syy = 0, sxy = 0, sxz = 0, syz = 0, sz = 0;
   for (let i = 0; i < n; i++) {
@@ -758,4 +758,33 @@ export function buildPath(s, o) {
     segs.push(...joins[r].segs);
   }
   return sane({ start, segs }, s);
+}
+
+// 동심원 맞춤: 이미 찾은 원(마커의 점 등)과 같은 중심을 도는 윤곽 부분을 정확한 원 위로 옮긴다.
+// 원 일부가 다른 도형(꼬리·선)과 붙어 있어도 원 부분은 정확한 원호가 된다.
+export function snapConcentric(c, centers) {
+  for (const { cx, cy, r0 } of centers) {
+    let near = 0;
+    const rs = new Float64Array(c.n);
+    for (let i = 0; i < c.n; i++) { rs[i] = Math.hypot(c.xs[i] - cx, c.ys[i] - cy); if (rs[i] < r0 * 4 + 6) near++; }
+    if (near < 12) continue;
+    // 반지름 분포에서 가장 많은 반지름(0.25px 단위)
+    const H = new Map();
+    for (let i = 0; i < c.n; i++) { if (rs[i] > r0 * 4 + 6) continue; const k = Math.round(rs[i] * 4); H.set(k, (H.get(k) || 0) + 1); }
+    let bestK = 0, bv = 0;
+    for (const [k] of H) { const v = (H.get(k - 2) || 0) + (H.get(k - 1) || 0) + (H.get(k) || 0) + (H.get(k + 1) || 0) + (H.get(k + 2) || 0); if (v > bv) { bv = v; bestK = k; } }
+    // 그 띠 안의 점들 평균 반지름
+    let sr = 0, sn = 0;
+    for (let i = 0; i < c.n; i++) if (Math.abs(rs[i] - bestK / 4) < 0.8) { sr += rs[i]; sn++; }
+    const R = sr / sn;
+    if (R < 1.2) continue;
+    // 원호 각도 범위가 충분히 길어야(전체의 45% 이상)
+    if ((sn * (c.length / c.n)) < 2 * Math.PI * R * 0.45) continue;
+    for (let i = 0; i < c.n; i++) {
+      if (Math.abs(rs[i] - R) < 1.5) { const f = R / rs[i]; c.xs[i] = cx + (c.xs[i] - cx) * f; c.ys[i] = cy + (c.ys[i] - cy) * f; }
+    }
+    c.concentric = true;
+    return { cx, cy, R, full: sn > c.n * 0.92 };
+  }
+  return null;
 }

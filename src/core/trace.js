@@ -1,7 +1,7 @@
-import { compositeOnWhite, buildPalette, unmix, denoise } from './palette.js?v=afd93cf8';
-import { extractStrokes, inkCoverage } from './strokes.js?v=afd93cf8';
-import { maskBounds, upsample, gaussianBlur, preserveThin, marchingSquares } from './contour.js?v=afd93cf8';
-import { resampleClosed, analyzeContour, alignRuns, equalizeStrokes, buildPath } from './fit.js?v=afd93cf8';
+import { compositeOnWhite, buildPalette, unmix, denoise } from './palette.js?v=8e72d564';
+import { extractStrokes, inkCoverage } from './strokes.js?v=8e72d564';
+import { maskBounds, upsample, gaussianBlur, preserveThin, marchingSquares } from './contour.js?v=8e72d564';
+import { resampleClosed, analyzeContour, alignRuns, equalizeStrokes, buildPath, fitCircle, snapConcentric } from './fit.js?v=8e72d564';
 
 export const DEFAULTS = {
   colors: 'auto',   // 대표색 개수(숫자 또는 auto)
@@ -116,6 +116,203 @@ function boxMean(m, w, h, r) {
   return o;
 }
 
+// 면 얼룩 정리: 원본에서 두 색 사이 경계가 흐릿하게 번져 있으면(음영·그라데이션) 진짜 경계가 아니다.
+// 같은 색 계열끼리 흐린 경계로 맞닿은 조각은 더 큰 면으로 합치고, 아주 작은 얼룩은 크기만으로도 흡수한다.
+function cleanRegions(masks, palette, bg, w, h, img) {
+  const K = palette.length, n = w * h, d = img.data;
+  const lab = new Int8Array(n).fill(-1);
+  for (let i = 0; i < n; i++) {
+    let b = -1, bv = 0.5;
+    for (let k = 0; k < K; k++) if (masks[k][i] > bv) { bv = masks[k][i]; b = k; }
+    lab[i] = b;
+  }
+  const hue = palette.map((c) => {
+    const mx = Math.max(...c), mn = Math.min(...c), dd = mx - mn;
+    if (dd < 25) return null;
+    const hh = mx === c[0] ? ((c[1] - c[2]) / dd) % 6 : mx === c[1] ? (c[2] - c[0]) / dd + 2 : (c[0] - c[1]) / dd + 4;
+    return (hh * 60 + 360) % 360;
+  });
+  const lumc = (c) => 0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2];
+  const chromatic = (k) => hue[k] != null;
+  // 같은 계열: 색조가 비슷한 유채색끼리, 또는 유채색의 아주 옅은 틴트와 배경
+  const B0 = palette[bg];
+  // 옅은 틴트: 배경과의 차이가 작은 유채색(유리·은은한 음영). 배경과 흐리게 맞닿으면 배경으로 흡수
+  const pale = palette.map((c, k) => k !== bg && chromatic(k) && Math.hypot(c[0] - B0[0], c[1] - B0[1], c[2] - B0[2]) < 90);
+  const family = (a, b) => {
+    if (chromatic(a) && chromatic(b)) return Math.min(Math.abs(hue[a] - hue[b]), 360 - Math.abs(hue[a] - hue[b])) < 25;
+    if ((a === bg && pale[b]) || (b === bg && pale[a])) return true;
+    return false;
+  };
+  // 원본 기울기(2px 간격 색 차이)
+  const g = new Float32Array(n);
+  for (let y = 1; y < h - 1; y++) for (let x = 1; x < w - 1; x++) {
+    const i = y * w + x;
+    const cd = (p, q) => Math.abs(d[p * 4] - d[q * 4]) + Math.abs(d[p * 4 + 1] - d[q * 4 + 1]) + Math.abs(d[p * 4 + 2] - d[q * 4 + 2]);
+    g[i] = Math.max(cd(i - 1, i + 1), cd(i - w, i + w));
+  }
+  // 영역 나누기
+  const comp = new Int32Array(n).fill(-1), st = [], areas = [], colors = [], pix = [];
+  for (let s0 = 0; s0 < n; s0++) {
+    if (lab[s0] < 0 || comp[s0] >= 0) continue;
+    const id = areas.length, c = lab[s0], px = [];
+    st.push(s0); comp[s0] = id;
+    while (st.length) {
+      const q = st.pop(); px.push(q);
+      const x = q % w, y = (q / w) | 0;
+      for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+        const xx = x + dx, yy = y + dy;
+        if (xx < 0 || yy < 0 || xx >= w || yy >= h) continue;
+        const k = yy * w + xx;
+        if (lab[k] === c && comp[k] < 0) { comp[k] = id; st.push(k); }
+      }
+    }
+    areas.push(px.length); colors.push(c); pix.push(px);
+  }
+  const R = areas.length;
+  // 맞닿은 경계: 쌍마다 경계 길이와 흐린 경계 수
+  const pair = new Map();
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    const i = y * w + x, a = comp[i];
+    if (a < 0) continue;
+    for (const k of [x + 1 < w ? i + 1 : -1, y + 1 < h ? i + w : -1]) {
+      if (k < 0) continue;
+      const b = comp[k];
+      if (b < 0 || b === a) continue;
+      const ca = palette[colors[a]], cb = palette[colors[b]];
+      const D = Math.abs(ca[0] - cb[0]) + Math.abs(ca[1] - cb[1]) + Math.abs(ca[2] - cb[2]);
+      const gm = Math.max(g[i], g[k]);
+      const key = a < b ? a * R + b : b * R + a;
+      let e = pair.get(key);
+      if (!e) pair.set(key, (e = { a: Math.min(a, b), b: Math.max(a, b), len: 0, soft: 0 }));
+      e.len++;
+      if (gm < D * 0.45) e.soft++; // 경계를 가로지르는 변화가 색 차이의 절반도 안 됨 = 번진 경계
+    }
+  }
+  const nb = Array.from({ length: R }, () => []);
+  for (const e of pair.values()) { nb[e.a].push(e); nb[e.b].push(e); }
+  const par = new Int32Array(R).map((_, i) => i);
+  const find = (x) => { while (x < R && par[x] !== x) x = par[x]; return x; };
+  const area = areas.slice();
+  // 배경으로 보낼 때 쓰는 가상의 배경 영역(색 = bg)
+  let bgVirtual = -1;
+  const bgRoot = () => {
+    if (bgVirtual < 0) { bgVirtual = par.length; }
+    return bgVirtual;
+  };
+  const order = [...Array(R).keys()].sort((p, q) => areas[p] - areas[q]);
+  const tiny = n * 0.0004, big = n * 0.08;
+  for (const r of order) {
+    if (find(r) !== r || (area[r] > big && !pale[colors[r]])) continue;
+    const c = colors[r];
+    let best = -1, bv = 0, tot = 0;
+    for (const e of nb[r]) {
+      const o = find(e.a === r ? e.b : e.a);
+      if (o === r) continue;
+      tot += e.len;
+      const oc = colors[o];
+      const softFrac = e.soft / e.len;
+      let ok = false;
+      if (family(c, oc) && softFrac > 0.6 && (area[o] >= area[r] || oc === bg)) ok = true; // 같은 계열의 음영 얼룩·배경으로 번지는 옅은 틴트
+      else if (area[r] < tiny && chromatic(c) && softFrac > 0.6 && area[o] > area[r] * 4) ok = true; // 아주 작은 번짐 점
+      if (ok && e.len > bv) { bv = e.len; best = o; }
+    }
+    // 옅은 틴트가 배경 쪽으로 흐리게 번져 있으면(번진 경계가 둘레의 20% 이상) 워시(물감 번짐)로 보고 배경으로
+    if (pale[c]) {
+      let softBg = 0;
+      for (const e of nb[r]) { const o = find(e.a === r ? e.b : e.a); if (colors[o] === bg) softBg += e.soft; }
+      if (softBg >= tot * 0.2) { best = -2; }
+    }
+    if (best === -2) { par[r] = bgRoot(r); continue; }
+    if (best < 0 || bv < tot * 0.3) continue;
+    par[r] = best; area[best] += area[r];
+  }
+  for (let r = 0; r < R; r++) {
+    let t = r, hops = 0;
+    while (t < R && par[t] !== t && hops++ < R) t = par[t];
+    if (t === r) continue;
+    const from = colors[r], to = t >= R ? bg : colors[t];
+    if (from === to) continue;
+    const mf = masks[from], mt = masks[to];
+    for (const q of pix[r]) { mt[q] = Math.min(1, mt[q] + mf[q]); mf[q] = 0; }
+  }
+}
+
+function flattenFaces(masks, palette, bg, ink, cov, w, h, img) {
+  const n = w * h, K = palette.length, d = img.data;
+  const cdiff = (p, q) => Math.abs(d[p * 4] - d[q * 4]) + Math.abs(d[p * 4 + 1] - d[q * 4 + 1]) + Math.abs(d[p * 4 + 2] - d[q * 4 + 2]);
+  const grad = (i) => { const x = i % w, y = (i / w) | 0; if (x < 1 || y < 1 || x >= w - 1 || y >= h - 1) return 0; return Math.max(cdiff(i - 1, i + 1), cdiff(i - w, i + w)); };
+  const lab = new Int8Array(n).fill(-1);
+  for (let i = 0; i < n; i++) {
+    let b = -1, bv = 0.5;
+    for (let k = 0; k < K; k++) if (masks[k][i] > bv) { bv = masks[k][i]; b = k; }
+    lab[i] = b;
+  }
+  // 면 = 잉크가 아닌 픽셀의 4방향 연결 덩어리
+  const wall = new Uint8Array(n);
+  for (let i = 0; i < n; i++) wall[i] = cov[i] >= 0.3 || lab[i] === ink ? 1 : 0;
+  const face = new Int32Array(n).fill(-1), st = [];
+  const faces = [];
+  for (let s0 = 0; s0 < n; s0++) {
+    if (wall[s0] || face[s0] >= 0) continue;
+    const id = faces.length, px = [];
+    st.push(s0); face[s0] = id;
+    while (st.length) {
+      const q = st.pop(); px.push(q);
+      const x = q % w, y = (q / w) | 0;
+      if (x > 0 && !wall[q - 1] && face[q - 1] < 0) { face[q - 1] = id; st.push(q - 1); }
+      if (x < w - 1 && !wall[q + 1] && face[q + 1] < 0) { face[q + 1] = id; st.push(q + 1); }
+      if (y > 0 && !wall[q - w] && face[q - w] < 0) { face[q - w] = id; st.push(q - w); }
+      if (y < h - 1 && !wall[q + w] && face[q + w] < 0) { face[q + w] = id; st.push(q + w); }
+    }
+    faces.push(px);
+  }
+  const B0 = palette[bg];
+  const pale = palette.map((c, k) => k !== bg && Math.max(...c) - Math.min(...c) >= 25 && Math.hypot(c[0] - B0[0], c[1] - B0[1], c[2] - B0[2]) < 90);
+  for (const px of faces) {
+    if (px.length < 30) continue;
+    const cnt = new Float64Array(K);
+    for (const q of px) if (lab[q] >= 0) cnt[lab[q]]++;
+    let M = 0;
+    for (let k = 1; k < K; k++) if (cnt[k] > cnt[M]) M = k;
+    // 면 안의 다른 색 덩어리
+    const seen = new Uint8Array(0);
+    const inFace = new Map();
+    for (const q of px) inFace.set(q, 1);
+    const done = new Set();
+    for (const q0 of px) {
+      const c = lab[q0];
+      if (c < 0 || c === M || c === ink || done.has(q0)) continue;
+      const comp = [q0];
+      done.add(q0);
+      for (let j = 0; j < comp.length; j++) {
+        const q = comp[j], x = q % w;
+        for (const k of [x > 0 ? q - 1 : -1, x < w - 1 ? q + 1 : -1, q - w, q + w]) {
+          if (k < 0 || k >= n || done.has(k) || lab[k] !== c || !inFace.has(k)) continue;
+          done.add(k); comp.push(k);
+        }
+      }
+      const A = comp.length;
+      // 경계가 또렷하면(원본에서 색이 확 바뀜) 진짜 도형이므로 그대로 둔다. 흐리게 번진 얼룩만 면 색으로
+      const pc = palette[c], pm = palette[M];
+      const D = Math.abs(pc[0] - pm[0]) + Math.abs(pc[1] - pm[1]) + Math.abs(pc[2] - pm[2]);
+      let bl = 0, soft = 0;
+      for (const q of comp) {
+        const x = q % w;
+        for (const k of [x > 0 ? q - 1 : -1, x < w - 1 ? q + 1 : -1, q - w, q + w]) {
+          if (k < 0 || k >= n || lab[k] !== M) continue;
+          bl++; if (Math.max(grad(q), grad(k)) < D * 0.45) soft++;
+        }
+      }
+      if (!bl || soft < bl * 0.5) continue;
+      // 옅은 틴트 얼룩은 면 절반 미만이면, 그 외 색은 면의 30% 미만·작은 조각일 때만 면 색으로
+      const replace = (pale[c] && (M === bg || pale[M]) && A < px.length * 0.5) || (A < px.length * 0.3 && A < n * 0.003);
+      if (!replace) continue;
+      for (const q of comp) { masks[M][q] = Math.min(1, masks[M][q] + masks[c][q]); masks[c][q] = 0; }
+    }
+    void seen;
+  }
+}
+
 function fillUnderInk(items, cov, w, h) {
   if (!items.length) return;
   // 선 아래 픽셀은 주변(7x7)에서 잉크가 아닌 픽셀 중 가장 많은 색(배경 포함)으로 정한다.
@@ -180,6 +377,14 @@ export function trace(input, opts = {}, progress = () => {}) {
     if (keep.length < palette.length) { palette = keep; um = unmix(img, palette); }
   }
   const { masks, bg, counts } = um;
+  cleanRegions(masks, palette, bg, w, h, img);
+  {
+    // 선으로 둘러싸인 면마다 색 하나로(물감 번짐·음영 얼룩 제거)
+    const lumP0 = (c) => 0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2];
+    let ink0 = -1;
+    for (let k = 0; k < palette.length; k++) { const c = palette[k]; if (k !== bg && Math.max(...c) - Math.min(...c) < 28 && lumP0(c) < 90 && (ink0 < 0 || lumP0(c) < lumP0(palette[ink0]))) ink0 = k; }
+    if (ink0 >= 0) flattenFaces(masks, palette, bg, ink0, inkCoverage(img, palette[ink0]), w, h, img);
+  }
   for (const r of photos) for (const m of masks) for (let y = r.y; y < r.y + r.h; y++) m.fill(0, y * w + r.x, y * w + r.x + r.w);
 
   // 겹쳐 쌓기: 색 c가 배경→d 사이의 연한 색(틴트)이면, c 레이어는 "c만큼 이상 진한 d"까지 포함한다.
@@ -224,7 +429,7 @@ export function trace(input, opts = {}, progress = () => {}) {
     // 선 아래로 색 면을 이어 칠한다: 선을 빼도 초록 면에 구멍(흰 테두리)이 남지 않게
     fillUnderInk(stacked.filter((it) => !it.ink), cov, w, h);
     if (o.debugCov) o.debugCov(cov);
-    const r = extractStrokes(cov, w, h, { lineTol: 0.75, snapDeg: 3.5, binTh: 0.2 });
+    const r = extractStrokes(cov, w, h, { lineTol: 0.75, snapDeg: 6, binTh: 0.2 });
     const bc = palette[bg], ic = ink.rgb;
     // 색은 검정·회색 두 가지, 굵기는 길이 가중 2~3단계로 통일
     const gray = hex(ic.map((v, k) => Math.round(bc[k] + (v - bc[k]) * 0.5)));
@@ -252,6 +457,7 @@ export function trace(input, opts = {}, progress = () => {}) {
 export function vectorize(items, w, h, o, progress = () => {}) {
   const layers = [];
   const allShapes = [];
+  const pending = [];
   items.forEach(({ color, mask }, li) => {
     progress('윤곽 추출', 0.1 + 0.6 * (li / items.length));
     const b = maskBounds(mask, w, h, 3);
@@ -261,16 +467,40 @@ export function vectorize(items, w, h, o, progress = () => {}) {
     let f = gaussianBlur(up.f, up.W, up.H, o.blur * s);
     if (o.thin) f = preserveThin(f, up.W, up.H, s);
     const loops = marchingSquares(f, up.W, up.H, 0.5);
-    const shapes = [];
+    const cs = [];
     for (const loop of loops) {
       const raw = loop.map(([X, Y]) => [(X + 0.5) / s + b.x0, (Y + 0.5) / s + b.y0]);
       const c = resampleClosed(raw, o.step);
       if (c.area < o.minArea) continue;
+      cs.push(c);
+    }
+    pending.push({ color, cs, bounds: b });
+  });
+  // 작은 원(점·마커 중심)을 먼저 찾아 기준 중심으로 삼는다
+  const centers = [];
+  for (const L of pending) for (const c of L.cs) {
+    const ci = fitCircle(c.xs, c.ys, c.n);
+    if (!ci || ci.r < 1.5 || ci.r > 40) continue;
+    if (ci.maxd <= Math.max(0.6, ci.r * 0.12) && Math.abs(c.area - Math.PI * ci.r * ci.r) < Math.PI * ci.r * ci.r * 0.2) centers.push({ cx: ci.cx, cy: ci.cy, r0: ci.r });
+  }
+  for (const L of pending) {
+    const shapes = [];
+    for (const c of L.cs) {
+      // 거의 원이면(작은 도형) 정확한 원으로
+      const ci = fitCircle(c.xs, c.ys, c.n);
+      if (ci && ci.r >= 1.5 && ci.r <= 40 && ci.maxd <= Math.max(0.6, ci.r * 0.12) && Math.abs(c.area - Math.PI * ci.r * ci.r) < Math.PI * ci.r * ci.r * 0.2) {
+        // 가까운 기준 중심이 있으면 그 중심에 맞춘다(동심원 정렬)
+        const ctr = centers.find((q) => Math.hypot(q.cx - ci.cx, q.cy - ci.cy) < Math.max(1.2, ci.r * 0.25));
+        shapes.push({ kind: 'circle', cx: ctr ? ctr.cx : ci.cx, cy: ctr ? ctr.cy : ci.cy, r: ci.r });
+        continue;
+      }
+      const sc = centers.length ? snapConcentric(c, centers) : null;
+      if (sc && sc.full) { shapes.push({ kind: 'circle', cx: sc.cx, cy: sc.cy, r: sc.R }); continue; }
       shapes.push(analyzeContour(c, { ...o, step: c.length / c.n }));
     }
     allShapes.push(...shapes);
-    layers.push({ color, shapes, bounds: b });
-  });
+    layers.push({ color: L.color, shapes, bounds: L.bounds });
+  }
   progress('정렬', 0.75);
   if (o.align) alignRuns(allShapes, o.alignTol);
   if (o.strokes) equalizeStrokes(layers.map((l) => l.shapes), o);
