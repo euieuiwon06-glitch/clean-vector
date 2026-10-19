@@ -1,6 +1,9 @@
 const $ = (s) => document.querySelector(s);
 
-const stage = $('#stage'), world = $('#world'), orig = $('#orig'), vec = $('#vec'), outline = $('#outline');
+const stage = $('#stage'), world = $('#world'), vec = $('#vec'), outline = $('#outline');
+// 원본 이미지 칸은 파일을 열 때 채운다(빈 img 태그를 두지 않음)
+const orig = Object.assign(document.createElement('img'), { id: 'orig', alt: '원본 이미지', draggable: false, hidden: true });
+world.prepend(orig);
 const cvs = $('#anchors'), wipe = $('#wipe');
 let image = null, fileName = 'vector', result = null;
 let view = 'vec', Z = 1, TX = 0, TY = 0, wipeX = 0.5, fitZ = 1;
