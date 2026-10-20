@@ -1,8 +1,8 @@
-import { compositeOnWhite, buildPalette, unmix, denoise } from './palette.js?v=c3507fa7';
-import { unifyRepeats } from './repeat.js?v=c3507fa7';
-import { extractStrokes, inkCoverage, chainStrokes, pruneIsolated, dedupeParallel } from './strokes.js?v=c3507fa7';
-import { maskBounds, upsample, gaussianBlur, preserveThin, marchingSquares } from './contour.js?v=c3507fa7';
-import { resampleClosed, analyzeContour, alignRuns, equalizeStrokes, buildPath, fitCircle, snapConcentric } from './fit.js?v=c3507fa7';
+import { compositeOnWhite, buildPalette, unmix, denoise } from './palette.js?v=a68ca6f1';
+import { unifyRepeats } from './repeat.js?v=a68ca6f1';
+import { extractStrokes, inkCoverage, chainStrokes, pruneIsolated, dedupeParallel, rebuildDashes } from './strokes.js?v=a68ca6f1';
+import { maskBounds, upsample, gaussianBlur, preserveThin, marchingSquares } from './contour.js?v=a68ca6f1';
+import { resampleClosed, analyzeContour, alignRuns, equalizeStrokes, buildPath, fitCircle, snapConcentric } from './fit.js?v=a68ca6f1';
 
 export const DEFAULTS = {
   colors: 'auto',   // 대표색 개수(숫자 또는 auto)
@@ -298,6 +298,20 @@ function snapStrokeCircles(strokes, centers) {
         }
       }
       if (!best || Math.abs(best.sweep) < Math.PI / 3) continue;
+      // 3/4 이상 도는 고리는 완전한 원으로 닫는다(앞뒤 짧은 꼬리는 버림)
+      const lenOf = (arr) => { let L = 0; for (let i = 1; i < arr.length; i++) L += Math.hypot(arr[i][0] - arr[i - 1][0], arr[i][1] - arr[i - 1][1]); return L; };
+      if (Math.abs(best.sweep) > Math.PI * 1.45 && lenOf(pts.slice(0, best.a + 1)) < R * 1.5 && lenOf(pts.slice(best.b)) < R * 1.5) {
+        const kk = 0.5523 * R;
+        st.start = [cx + R, cy];
+        st.segs = [
+          { t: 'C', x1: cx + R, y1: cy + kk, x2: cx + kk, y2: cy + R, x: cx, y: cy + R },
+          { t: 'C', x1: cx - kk, y1: cy + R, x2: cx - R, y2: cy + kk, x: cx - R, y: cy },
+          { t: 'C', x1: cx - R, y1: cy - kk, x2: cx - kk, y2: cy - R, x: cx, y: cy - R },
+          { t: 'C', x1: cx + kk, y1: cy - R, x2: cx + R, y2: cy - kk, x: cx + R, y: cy },
+        ];
+        st.closed = true;
+        break;
+      }
       const a0 = Math.atan2(pts[best.a][1] - cy, pts[best.a][0] - cx);
       const n = Math.ceil(Math.abs(best.sweep) / (Math.PI / 2)), da = best.sweep / n, k = (4 / 3) * Math.tan(da / 4) * R;
       const arc = [];
@@ -542,11 +556,45 @@ export function trace(input, opts = {}, progress = () => {}) {
     const scl = Math.max(1, Math.sqrt((w * h) / 1.5e6));
     strokes = dedupeParallel(strokes, 1.4 * scl, 3.2 * scl);
     strokes = chainStrokes(strokes, 6 * scl);
+    strokes = rebuildDashes(strokes, 16 * scl, 1.6 * scl);
     strokes = pruneIsolated(strokes, 14 * scl, 1.5 * scl, cov, w, h);
     stacked[inkIdx] = { ...ink, mask: r.fillMask };
   }
   const v = vectorize(stacked, w, h, o, progress);
   if (strokes.length && v.centers?.length) snapStrokeCircles(strokes, v.centers);
+  // 선 둘레 회색 띠 제거: 채도 낮은 중간색 면 조각 중 대부분이 잉크 선 2.5px(배율) 안에 있는 것은 버린다
+  if (strokes.length) {
+    const sc = Math.max(1, Math.sqrt((w * h) / 1.5e6));
+    const near = new Uint8Array(w * h);
+    const R = Math.ceil(2.5 * sc);
+    for (const st of strokes) {
+      let p = st.start;
+      for (const g of st.segs) {
+        const q = [g.x, g.y], n = Math.max(1, Math.ceil(Math.hypot(q[0] - p[0], q[1] - p[1])));
+        for (let i = 0; i <= n; i++) {
+          const x = Math.round(p[0] + (q[0] - p[0]) * i / n), y = Math.round(p[1] + (q[1] - p[1]) * i / n);
+          for (let dy = -R; dy <= R; dy++) for (let dx = -R; dx <= R; dx++) { const xx = x + dx, yy = y + dy; if (xx >= 0 && yy >= 0 && xx < w && yy < h) near[yy * w + xx] = 1; }
+        }
+        p = q;
+      }
+    }
+    const inkHex1 = stacked.find((it) => it.ink)?.color;
+    const muted = (hx) => { const c = [1, 3, 5].map((i) => parseInt(hx.slice(i, i + 2), 16)); const mx = Math.max(...c), mn = Math.min(...c); return mx - mn < 60 && mx < 200 && mx > 50; };
+    for (const l of v.layers) {
+      if (l.color === inkHex1 || !muted(l.color)) continue;
+      const sg = outerSign(l.paths);
+      l.paths = l.paths.filter((p) => {
+        if (p.circle || p.ellipse || Math.sign(signedArea(p)) !== sg) return true;
+        let tot = 0, hit = 0, q = p.start;
+        for (const g of p.segs) {
+          const n = Math.max(1, Math.ceil(Math.hypot(g.x - q[0], g.y - q[1])));
+          for (let i = 0; i < n; i++) { const x = Math.round(q[0] + (g.x - q[0]) * i / n), y = Math.round(q[1] + (g.y - q[1]) * i / n); tot++; if (x >= 0 && y >= 0 && x < w && y < h && near[y * w + x]) hit++; }
+          q = [g.x, g.y];
+        }
+        return !(tot && hit >= tot * 0.6 && Math.abs(signedArea(p)) < 3000 * sc * sc);
+      });
+    }
+  }
   // 얇은 색 조각 제거: 선 둘레 번짐이 남은 가늘고 긴 색 조각(평균 폭이 1.2px·배율 미만)은 버린다
   if (strokes.length) {
     const sc = Math.max(1, Math.sqrt((w * h) / 1.5e6));
@@ -735,14 +783,14 @@ export function toSVG(res, { background = true, hrefs = {}, outW = res.width, ou
   if (res.strokes?.length) {
     const groups = new Map();
     for (const st of res.strokes) {
-      const k = `${st.color}|${st.width}|${st.cap || 'round'}`;
+      const k = `${st.color}|${st.width}|${st.cap || 'round'}|${st.dash ? st.dash.map((v) => Math.round(v * 4) / 4).join(' ') : ''}`;
       if (!groups.has(k)) groups.set(k, []);
       groups.get(k).push(openPathData(st));
     }
     out.push('<g id="lines" fill="none" stroke-linecap="round" stroke-linejoin="round">');
     for (const [k, ds] of groups) {
-      const [c, wd, cap] = k.split('|');
-      out.push(`<path stroke="${c}" stroke-width="${wd}"${cap === 'butt' ? ' stroke-linecap="butt"' : ''} d="${ds.join('')}"/>`);
+      const [c, wd, cap, dash] = k.split('|');
+      out.push(`<path stroke="${c}" stroke-width="${wd}"${cap === 'butt' ? ' stroke-linecap="butt"' : ''}${dash ? ` stroke-dasharray="${dash}"` : ''} d="${ds.join('')}"/>`);
     }
     out.push('</g>');
   }

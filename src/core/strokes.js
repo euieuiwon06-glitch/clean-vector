@@ -3,7 +3,7 @@
 // 2) 뼈대를 끝점·교차점 사이 선들로 나눠
 // 3) 직선은 그림의 주요 방향으로 정렬한 선분, 곡선은 매끈한 베지어로 맞추고
 // 4) 선마다 원본 단면에서 굵기·진하기를 재서 일정한 굵기의 획으로 만든다.
-import { fitCubic } from './fit.js?v=c3507fa7';
+import { fitCubic } from './fit.js?v=a68ca6f1';
 
 const DEG = Math.PI / 180;
 
@@ -1392,4 +1392,57 @@ export function dedupeParallel(strokes, dInk, dGray) {
     if (cover >= pts.length * 0.7) dead.add(k);
   }
   return strokes.filter((_, k) => !dead.has(k));
+}
+
+// 점선 재구성: 한 줄 위에 거의 같은 간격으로 늘어선 짧은 직선 조각(3개 이상)을
+// 하나의 직선 + 균일한 점선 패턴(stroke-dasharray)으로 바꾼다.
+export function rebuildDashes(strokes, maxLen, tol) {
+  const cand = [];
+  strokes.forEach((st, k) => {
+    if (st.closed) return;
+    const L = strokeLen(st);
+    if (L > maxLen) return;
+    const e = [st.segs[st.segs.length - 1].x, st.segs[st.segs.length - 1].y];
+    const dx = e[0] - st.start[0], dy = e[1] - st.start[1], l = Math.hypot(dx, dy);
+    if (l < L * 0.85 || l < 0.5) return; // 곧지 않으면 제외
+    let ux = dx / l, uy = dy / l;
+    if (ux < 0 || (ux === 0 && uy < 0)) { ux = -ux; uy = -uy; }
+    cand.push({ k, a: st.start, b: e, mx: (st.start[0] + e[0]) / 2, my: (st.start[1] + e[1]) / 2, ux, uy, len: l, st });
+  });
+  const used = new Set(), out = [], dead = new Set();
+  for (const c of cand) {
+    if (used.has(c.k)) continue;
+    // 같은 방향·같은 줄 위의 조각들
+    const grp = cand.filter((d) => !used.has(d.k) && Math.abs(c.ux * d.uy - c.uy * d.ux) < 0.12 && Math.abs((d.mx - c.mx) * -c.uy + (d.my - c.my) * c.ux) < tol);
+    if (grp.length < 3) continue;
+    // 줄 위 위치로 정렬하고, 간격이 너무 벌어지면 끊는다
+    const t = (d) => (d.mx - c.mx) * c.ux + (d.my - c.my) * c.uy;
+    grp.sort((p, q) => t(p) - t(q));
+    let run = [grp[0]];
+    const flush = () => {
+      if (run.length >= 3) {
+        const lens = run.map((d) => d.len).sort((p, q) => p - q), dash = lens[lens.length >> 1];
+        const gaps = [];
+        for (let i = 1; i < run.length; i++) gaps.push(t(run[i]) - t(run[i - 1]) - (run[i].len + run[i - 1].len) / 2);
+        gaps.sort((p, q) => p - q);
+        const gap = Math.max(dash * 0.3, gaps[gaps.length >> 1]);
+        // 줄 맞춤: 길이 가중 평균 위치·방향
+        let sx = 0, sy = 0, sw = 0; for (const d of run) { sx += d.mx * d.len; sy += d.my * d.len; sw += d.len; }
+        const cx = sx / sw, cy = sy / sw;
+        const t0 = t(run[0]) - run[0].len / 2, t1 = t(run[run.length - 1]) + run[run.length - 1].len / 2;
+        const base = (cx - c.mx) * c.ux + (cy - c.my) * c.uy;
+        const ox = cx - c.ux * base, oy = cy - c.uy * base;
+        const main = run.reduce((p, q) => (q.st.width > p.st.width ? q : p)).st;
+        out.push({ ...main, start: [ox + c.ux * t0, oy + c.uy * t0], segs: [{ t: 'L', x: ox + c.ux * t1, y: oy + c.uy * t1 }], dash: [dash, gap], cap: 'butt', closed: false });
+        for (const d of run) { used.add(d.k); dead.add(d.k); }
+      }
+    };
+    for (let i = 1; i < grp.length; i++) {
+      const g = t(grp[i]) - t(grp[i - 1]) - (grp[i].len + grp[i - 1].len) / 2;
+      if (g > maxLen * 2.5 || g < -0.5) { flush(); run = []; }
+      run.push(grp[i]);
+    }
+    flush();
+  }
+  return strokes.filter((_, k) => !dead.has(k)).concat(out);
 }
