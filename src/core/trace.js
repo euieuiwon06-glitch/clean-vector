@@ -1,8 +1,8 @@
-import { compositeOnWhite, buildPalette, unmix, denoise } from './palette.js?v=28854573';
-import { unifyRepeats } from './repeat.js?v=28854573';
-import { extractStrokes, inkCoverage, chainStrokes, pruneIsolated, dedupeParallel, rebuildDashes } from './strokes.js?v=28854573';
-import { maskBounds, upsample, gaussianBlur, preserveThin, marchingSquares } from './contour.js?v=28854573';
-import { resampleClosed, analyzeContour, alignRuns, equalizeStrokes, buildPath, fitCircle, snapConcentric } from './fit.js?v=28854573';
+import { compositeOnWhite, buildPalette, unmix, denoise } from './palette.js?v=812688a5';
+import { unifyRepeats } from './repeat.js?v=812688a5';
+import { extractStrokes, inkCoverage, chainStrokes, pruneIsolated, dedupeParallel, rebuildDashes } from './strokes.js?v=812688a5';
+import { maskBounds, upsample, gaussianBlur, preserveThin, marchingSquares } from './contour.js?v=812688a5';
+import { resampleClosed, analyzeContour, alignRuns, equalizeStrokes, buildPath, fitCircle, snapConcentric } from './fit.js?v=812688a5';
 
 export const DEFAULTS = {
   colors: 'auto',   // 대표색 개수(숫자 또는 auto)
@@ -781,6 +781,11 @@ export function trace(input, opts = {}, progress = () => {}) {
           let sx = p.start[0], sy = p.start[1], k = 1; for (const g of p.segs) { sx += g.x; sy += g.y; k++; }
           cx = sx / k; cy = sy / k;
         }
+        // 길쭉한 조각(물체의 일부: 바퀴·받침대 띠 등)은 점이 아니다 — 둘레 대비 면적이 작으면 제외
+        if (!p.circle && r > rMax * 0.4) {
+          let per = 0, q = p.start; for (const g of p.segs) { per += Math.hypot(g.x - q[0], g.y - q[1]); q = [g.x, g.y]; }
+          if ((4 * Math.PI * Math.PI * r * r) / (per * per) < 0.35) { if (r <= rMax) small.push({ li, pi, cx, cy, r, p, keep: true }); return; }
+        }
         if (r <= rMax) small.push({ li, pi, cx, cy, r, p });
       });
     });
@@ -798,7 +803,7 @@ export function trace(input, opts = {}, progress = () => {}) {
       const inside = v.layers.some((l) => l.paths.some((q) => q !== d.p && !q.circle && !q.ellipse && Math.abs(signedArea(q)) > Math.PI * d.r * d.r * 30 && inBox(q, d.cx, d.cy)));
       // 다른 원(고리) 안 가운데 점도 유지
       const inRing = v.layers.some((l) => l.paths.some((q) => q !== d.p && q.circle && q.circle.r > d.r * 1.5 && Math.hypot(q.circle.cx - d.cx, q.circle.cy - d.cy) < q.circle.r));
-      if (peers < 2 && !inside && !inRing) drop.add(d.li + ':' + d.pi);
+      if (!d.keep && peers < 2 && !inside && !inRing) drop.add(d.li + ':' + d.pi);
     });
     v.layers.forEach((l, li) => { l.paths = l.paths.filter((_, pi) => !drop.has(li + ':' + pi)); });
   }

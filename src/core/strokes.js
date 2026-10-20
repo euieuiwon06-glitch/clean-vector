@@ -3,7 +3,7 @@
 // 2) 뼈대를 끝점·교차점 사이 선들로 나눠
 // 3) 직선은 그림의 주요 방향으로 정렬한 선분, 곡선은 매끈한 베지어로 맞추고
 // 4) 선마다 원본 단면에서 굵기·진하기를 재서 일정한 굵기의 획으로 만든다.
-import { fitCubic } from './fit.js?v=28854573';
+import { fitCubic } from './fit.js?v=812688a5';
 
 const DEG = Math.PI / 180;
 
@@ -808,11 +808,12 @@ const intersect = (A, B) => {
 // 잉크 덮임: 주변(7x7)에서 가장 밝은 색을 바탕으로 보고, 픽셀이 바탕→잉크 사이 어디쯤인지(0~1).
 // 바탕→잉크 직선에서 벗어난 색(초록 경계 등)은 잉크가 아니다.
 export function inkCoverage(img, ink) {
+  const sclI = Math.max(1, Math.sqrt((img.width * img.height) / 1.5e6));
   const { width: w, height: h, data } = img;
   const L = new Float32Array(w * h);
   for (let i = 0; i < w * h; i++) L[i] = data[i * 4] * 0.299 + data[i * 4 + 1] * 0.587 + data[i * 4 + 2] * 0.114;
-  // 가로·세로 분리 최대 위치(7x7)
-  const R = 3;
+  // 가로·세로 분리 최대 위치(7x7, 배율 비례)
+  const R = Math.round(3 * sclI);
   const hx = new Int32Array(w * h), best = new Int32Array(w * h);
   for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
     let bi = y * w + x;
@@ -833,7 +834,7 @@ export function inkCoverage(img, ink) {
     if (vv < 900) {
       // 주변이 온통 잉크(두꺼운 글자·면 안쪽): 픽셀이 잉크색에 가까우면 잉크
       const d = Math.hypot(data[i * 4] - ink[0], data[i * 4 + 1] - ink[1], data[i * 4 + 2] - ink[2]);
-      if (d < 60) m[i] = 1;
+      if (d < (sclI > 1.3 ? 110 : 60)) m[i] = 1; // 진한 면 안쪽(확대 이미지는 짙은 회색 포함)
       continue;
     }
     const r = data[i * 4] - br, g = data[i * 4 + 1] - bg, bl = data[i * 4 + 2] - bb;
@@ -853,7 +854,7 @@ export function extractStrokes(m, w, h, o = {}) {
   for (let i = 0; i < w * h; i++) B[i] = m[i] >= (o.binTh ?? 0.2) ? 1 : 0;
   // 두꺼운 면 판정은 진한 부분만으로(흐린 선이 뭉쳐 면으로 잡히지 않게)
   const BT = new Uint8Array(w * h);
-  for (let i = 0; i < w * h; i++) BT[i] = m[i] >= 0.45 ? 1 : 0;
+  for (let i = 0; i < w * h; i++) BT[i] = m[i] >= (o.thickTh ?? (Math.sqrt((w * h) / 1.5e6) > 1.3 ? 0.3 : 0.45)) ? 1 : 0;
   const D = distance(BT, w, h);
   // 두꺼운 핵 → 원래 크기로 되돌린 영역 = 면
   const core = new Uint8Array(w * h);
