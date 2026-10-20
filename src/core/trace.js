@@ -1,8 +1,8 @@
-import { compositeOnWhite, buildPalette, unmix, denoise } from './palette.js?v=a68ca6f1';
-import { unifyRepeats } from './repeat.js?v=a68ca6f1';
-import { extractStrokes, inkCoverage, chainStrokes, pruneIsolated, dedupeParallel, rebuildDashes } from './strokes.js?v=a68ca6f1';
-import { maskBounds, upsample, gaussianBlur, preserveThin, marchingSquares } from './contour.js?v=a68ca6f1';
-import { resampleClosed, analyzeContour, alignRuns, equalizeStrokes, buildPath, fitCircle, snapConcentric } from './fit.js?v=a68ca6f1';
+import { compositeOnWhite, buildPalette, unmix, denoise } from './palette.js?v=ae7e2850';
+import { unifyRepeats } from './repeat.js?v=ae7e2850';
+import { extractStrokes, inkCoverage, chainStrokes, pruneIsolated, dedupeParallel, rebuildDashes } from './strokes.js?v=ae7e2850';
+import { maskBounds, upsample, gaussianBlur, preserveThin, marchingSquares } from './contour.js?v=ae7e2850';
+import { resampleClosed, analyzeContour, alignRuns, equalizeStrokes, buildPath, fitCircle, snapConcentric } from './fit.js?v=ae7e2850';
 
 export const DEFAULTS = {
   colors: 'auto',   // 대표색 개수(숫자 또는 auto)
@@ -201,9 +201,17 @@ function cleanRegions(masks, palette, bg, w, h, img) {
     return bgVirtual;
   };
   const order = [...Array(R).keys()].sort((p, q) => areas[p] - areas[q]);
-  const tiny = n * 0.0004, big = n * 0.08;
+  const tiny = n * 0.0004, big = n * 0.08, minPiece = Math.max(6, n * 0.000012);
   for (const r of order) {
     if (find(r) !== r || (area[r] > big && !pale[colors[r]])) continue;
+    // 공통 기준: 최소 면적보다 작은 조각은 색과 상관없이 가장 많이 맞닿은 이웃으로 흡수
+    if (area[r] < minPiece) {
+      let bo = -1, bl = 0, sl = 0, tl = 0;
+      for (const e of nb[r]) { const o = find(e.a === r ? e.b : e.a); tl += e.len; sl += e.soft; if (o !== r && e.len > bl) { bl = e.len; bo = o; } }
+      // 경계가 또렷한 작은 도형(창문·점)은 남기고, 흐린 얼룩·아주 작은 부스러기만
+      if (!(area[r] < 6 || sl > tl * 0.5)) bo = -1;
+      if (bo >= 0) { par[r] = bo; area[bo] += area[r]; continue; }
+    }
     const c = colors[r];
     let best = -1, bv = 0, tot = 0;
     for (const e of nb[r]) {
@@ -562,6 +570,28 @@ export function trace(input, opts = {}, progress = () => {}) {
   }
   const v = vectorize(stacked, w, h, o, progress);
   if (strokes.length && v.centers?.length) snapStrokeCircles(strokes, v.centers);
+  // 공통 기준: 원(점) 위·바로 옆을 지나는 짧은 선 조각은 지운다(도형 우선)
+  if (strokes.length) {
+    const sc = Math.max(1, Math.sqrt((w * h) / 1.5e6));
+    const circles = [];
+    for (const l of v.layers) for (const p of l.paths) if (p.circle) circles.push(p.circle);
+    if (circles.length) {
+      const C = 16 * sc, grid = new Map();
+      circles.forEach((c, j) => { const k = Math.floor(c.cx / C) + ',' + Math.floor(c.cy / C); if (!grid.has(k)) grid.set(k, []); grid.get(k).push(j); });
+      strokes = strokes.filter((st) => {
+        if (st.closed || st.dash) return true;
+        let L = 0, p = st.start;
+        for (const g of st.segs) { L += Math.hypot(g.x - p[0], g.y - p[1]); p = [g.x, g.y]; }
+        if (L > 20 * sc) return true;
+        const pts = [st.start, ...st.segs.map((g) => [g.x, g.y])];
+        for (const q of pts) for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) for (const j of grid.get((Math.floor(q[0] / C) + dx) + ',' + (Math.floor(q[1] / C) + dy)) || []) {
+          const c = circles[j];
+          if (Math.hypot(q[0] - c.cx, q[1] - c.cy) < c.r + 2 * sc) return false;
+        }
+        return true;
+      });
+    }
+  }
   // 선 둘레 회색 띠 제거: 채도 낮은 중간색 면 조각 중 대부분이 잉크 선 2.5px(배율) 안에 있는 것은 버린다
   if (strokes.length) {
     const sc = Math.max(1, Math.sqrt((w * h) / 1.5e6));
@@ -691,6 +721,17 @@ export function vectorize(items, w, h, o, progress = () => {}) {
         const ctr = centers.find((q) => Math.hypot(q.cx - ci.cx, q.cy - ci.cy) < Math.max(1.2, ci.r * 0.25));
         shapes.push({ kind: 'circle', cx: ctr ? ctr.cx : ci.cx, cy: ctr ? ctr.cy : ci.cy, r: ci.r });
         continue;
+      }
+      // 공통 기준: 원에 가까운(둘레 대비 면적) 작은 도형은 같은 면적의 정원으로
+      {
+        const iso = (4 * Math.PI * c.area) / (c.length * c.length);
+        const req = Math.sqrt(c.area / Math.PI);
+        if (iso > 0.86 && req <= Math.max(6, Math.sqrt(w * h) * 0.02)) {
+          let mx = 0, my = 0;
+          for (let i = 0; i < c.n; i++) { mx += c.xs[i]; my += c.ys[i]; }
+          shapes.push({ kind: 'circle', cx: mx / c.n, cy: my / c.n, r: req });
+          continue;
+        }
       }
       const sc = centers.length ? snapConcentric(c, centers) : null;
       if (sc && sc.full) { shapes.push({ kind: 'circle', cx: sc.cx, cy: sc.cy, r: sc.R }); continue; }
