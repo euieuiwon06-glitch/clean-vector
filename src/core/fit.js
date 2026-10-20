@@ -582,6 +582,7 @@ function sane(p, s) {
 
 export function buildPath(s, o) {
   if (s.kind === 'circle') return { circle: s };
+  if (s.kind === 'path') return { start: s.start, segs: s.segs };
   if (s.kind === 'ellipse') return { ellipse: s };
   const { n, xs, ys, turn, w, runs } = s;
   const P = (i) => [xs[((i % n) + n) % n], ys[((i % n) + n) % n]];

@@ -1,8 +1,8 @@
-import { compositeOnWhite, buildPalette, unmix, denoise } from './palette.js?v=7c953b71';
-import { unifyRepeats } from './repeat.js?v=7c953b71';
-import { extractStrokes, inkCoverage, chainStrokes, pruneIsolated, dedupeParallel, rebuildDashes } from './strokes.js?v=7c953b71';
-import { maskBounds, upsample, gaussianBlur, preserveThin, marchingSquares } from './contour.js?v=7c953b71';
-import { resampleClosed, analyzeContour, alignRuns, equalizeStrokes, buildPath, fitCircle, snapConcentric } from './fit.js?v=7c953b71';
+import { compositeOnWhite, buildPalette, unmix, denoise } from './palette.js?v=0ed6980e';
+import { unifyRepeats } from './repeat.js?v=0ed6980e';
+import { extractStrokes, inkCoverage, chainStrokes, pruneIsolated, dedupeParallel, rebuildDashes } from './strokes.js?v=0ed6980e';
+import { maskBounds, upsample, gaussianBlur, preserveThin, marchingSquares } from './contour.js?v=0ed6980e';
+import { resampleClosed, analyzeContour, alignRuns, equalizeStrokes, buildPath, fitCircle, snapConcentric } from './fit.js?v=0ed6980e';
 
 export const DEFAULTS = {
   colors: 'auto',   // 대표색 개수(숫자 또는 auto)
@@ -119,6 +119,39 @@ function boxMean(m, w, h, r) {
 
 // 면 얼룩 정리: 원본에서 두 색 사이 경계가 흐릿하게 번져 있으면(음영·그라데이션) 진짜 경계가 아니다.
 // 같은 색 계열끼리 흐린 경계로 맞닿은 조각은 더 큰 면으로 합치고, 아주 작은 얼룩은 크기만으로도 흡수한다.
+// 공통 기준: 같은 색 계열(색조 25° 이내 유채색)끼리 붙은 덩어리는, 한 색이 60% 이상이면 전체를 그 색 하나로
+function unifyFamilies(masks, palette, w, h) {
+  const K = palette.length, n = w * h;
+  const hue = palette.map((c) => {
+    const mx = Math.max(...c), mn = Math.min(...c), d = mx - mn;
+    if (d < 40) return null;
+    const hh = mx === c[0] ? ((c[1] - c[2]) / d) % 6 : mx === c[1] ? (c[2] - c[0]) / d + 2 : (c[0] - c[1]) / d + 4;
+    return (hh * 60 + 360) % 360;
+  });
+  const fam = (a, b) => hue[a] != null && hue[b] != null && Math.min(Math.abs(hue[a] - hue[b]), 360 - Math.abs(hue[a] - hue[b])) < 25;
+  const lab = new Int8Array(n).fill(-1);
+  for (let i = 0; i < n; i++) { let b = -1, bv = 0.5; for (let k = 0; k < K; k++) if (masks[k][i] > bv) { bv = masks[k][i]; b = k; } lab[i] = b; }
+  const seen = new Uint8Array(n), st = [];
+  for (let s0 = 0; s0 < n; s0++) {
+    const c0 = lab[s0];
+    if (c0 < 0 || hue[c0] == null || seen[s0]) continue;
+    const px = [], cnt = new Float64Array(K);
+    st.push(s0); seen[s0] = 1;
+    while (st.length) {
+      const q = st.pop(); px.push(q); cnt[lab[q]]++;
+      const x = q % w;
+      for (const k of [x > 0 ? q - 1 : -1, x < w - 1 ? q + 1 : -1, q - w, q + w]) {
+        if (k < 0 || k >= n || seen[k]) continue;
+        const l = lab[k];
+        if (l >= 0 && (l === c0 || fam(l, c0))) { seen[k] = 1; st.push(k); }
+      }
+    }
+    let M = 0; for (let k = 1; k < K; k++) if (cnt[k] > cnt[M]) M = k;
+    if (cnt[M] < px.length * 0.6 || cnt[M] === px.length) continue;
+    for (const q of px) { const l = lab[q]; if (l !== M) { masks[M][q] = Math.min(1, masks[M][q] + masks[l][q]); masks[l][q] = 0; } }
+  }
+}
+
 function cleanRegions(masks, palette, bg, w, h, img) {
   const K = palette.length, n = w * h, d = img.data;
   const lab = new Int8Array(n).fill(-1);
@@ -251,6 +284,49 @@ function inBox(p, x, y) {
   let x0 = p.start[0], x1 = x0, y0 = p.start[1], y1 = y0;
   for (const g of p.segs) { if (g.x < x0) x0 = g.x; if (g.x > x1) x1 = g.x; if (g.y < y0) y0 = g.y; if (g.y > y1) y1 = g.y; }
   return x > x0 && x < x1 && y > y0 && y < y1;
+}
+
+// 막대 맞춤: 주축 방향 직사각형 대비 채움 비율로 직사각형(0.88 이상)·캡슐(0.72~0.88) 판정
+function pip(xs, ys, n, x, y) {
+  let ins = false;
+  for (let i = 0, j = n - 1; i < n; j = i++) if ((ys[i] > y) !== (ys[j] > y) && x < ((xs[j] - xs[i]) * (y - ys[i])) / (ys[j] - ys[i]) + xs[i]) ins = !ins;
+  return ins;
+}
+function fitBar(c, maxLen) {
+  const n = c.n;
+  let mx = 0, my = 0; for (let i = 0; i < n; i++) { mx += c.xs[i]; my += c.ys[i]; } mx /= n; my /= n;
+  let sxx = 0, syy = 0, sxy = 0; for (let i = 0; i < n; i++) { const dx = c.xs[i] - mx, dy = c.ys[i] - my; sxx += dx * dx; syy += dy * dy; sxy += dx * dy; }
+  const th = 0.5 * Math.atan2(2 * sxy, sxx - syy), ux = Math.cos(th), uy = Math.sin(th);
+  let u0 = Infinity, u1 = -Infinity, v0 = Infinity, v1 = -Infinity;
+  for (let i = 0; i < n; i++) { const dx = c.xs[i] - mx, dy = c.ys[i] - my, u = dx * ux + dy * uy, v = -dx * uy + dy * ux; u0 = Math.min(u0, u); u1 = Math.max(u1, u); v0 = Math.min(v0, v); v1 = Math.max(v1, v); }
+  const L = u1 - u0, W = v1 - v0;
+  if (W < 1.5 || L > maxLen || L < W * 1.6) return null;
+  const fill = c.area / (L * W);
+  if (fill < 0.72) return null;
+  // 가장자리 직선성: 긴 변 쪽 점들이 v0·v1 근처에 몰려야
+  let off = 0, cnt = 0;
+  for (let i = 0; i < n; i++) { const dx = c.xs[i] - mx, dy = c.ys[i] - my, u = dx * ux + dy * uy, v = -dx * uy + dy * ux; if (u > u0 + W * 0.6 && u < u1 - W * 0.6) { off += Math.min(Math.abs(v - v0), Math.abs(v - v1)); cnt++; } }
+  if (cnt && off / cnt > Math.max(0.6, W * 0.12)) return null;
+  const cx = mx + ux * (u0 + u1) / 2 - uy * (v0 + v1) / 2, cy = my + uy * (u0 + u1) / 2 + ux * (v0 + v1) / 2;
+  const P = (u, v) => [cx + ux * u - uy * v, cy + uy * u + ux * v];
+  const hl = L / 2, hw = W / 2;
+  if (fill >= 0.88) {
+    const a = P(-hl, -hw), b = P(hl, -hw), d = P(hl, hw), e = P(-hl, hw);
+    return { kind: 'path', start: a, segs: [{ t: 'L', x: b[0], y: b[1] }, { t: 'L', x: d[0], y: d[1] }, { t: 'L', x: e[0], y: e[1] }, { t: 'L', x: a[0], y: a[1] }] };
+  }
+  // 캡슐: 양 끝 반원
+  const k = 0.5523 * hw, L2 = hl - hw;
+  const p1 = P(-L2, -hw), p2 = P(L2, -hw), p3 = P(L2, hw), p4 = P(-L2, hw), m1 = P(hl, 0), m2 = P(-hl, 0);
+  const q = (u, v) => P(u, v);
+  const segs = [
+    { t: 'L', x: p2[0], y: p2[1] },
+    { t: 'C', x1: q(L2 + k, -hw)[0], y1: q(L2 + k, -hw)[1], x2: q(hl, -k)[0], y2: q(hl, -k)[1], x: m1[0], y: m1[1] },
+    { t: 'C', x1: q(hl, k)[0], y1: q(hl, k)[1], x2: q(L2 + k, hw)[0], y2: q(L2 + k, hw)[1], x: p3[0], y: p3[1] },
+    { t: 'L', x: p4[0], y: p4[1] },
+    { t: 'C', x1: q(-L2 - k, hw)[0], y1: q(-L2 - k, hw)[1], x2: q(-hl, k)[0], y2: q(-hl, k)[1], x: m2[0], y: m2[1] },
+    { t: 'C', x1: q(-hl, -k)[0], y1: q(-hl, -k)[1], x2: q(-L2 - k, -hw)[0], y2: q(-L2 - k, -hw)[1], x: p1[0], y: p1[1] },
+  ];
+  return { kind: 'path', start: p1, segs };
 }
 
 function signedArea(p) {
@@ -491,6 +567,7 @@ export function trace(input, opts = {}, progress = () => {}) {
   }
   const { masks, bg, counts } = um;
   cleanRegions(masks, palette, bg, w, h, img);
+  unifyFamilies(masks, palette, w, h);
   {
     // 선으로 둘러싸인 면마다 색 하나로(물감 번짐·음영 얼룩 제거)
     const lumP0 = (c) => 0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2];
@@ -664,6 +741,45 @@ export function trace(input, opts = {}, progress = () => {}) {
       });
     }
   }
+  // 공통 기준: 외톨이 작은 도형(점·찌꺼기)은 색과 상관없이 제거.
+  // 비슷한 크기의 도형이 가까이(반지름 8배 안) 반복되면 무늬로 보고 남긴다. 구멍·선 위 점은 유지.
+  {
+    const D = Math.sqrt(w * h), rMax = D * 0.006;
+    const small = [];
+    v.layers.forEach((l, li) => {
+      const sg = outerSign(l.paths);
+      l.paths.forEach((p, pi) => {
+        let cx, cy, r;
+        if (p.circle) { cx = p.circle.cx; cy = p.circle.cy; r = p.circle.r; }
+        else if (p.ellipse) return;
+        else {
+          const a = signedArea(p);
+          if (Math.sign(a) !== sg) return;
+          r = Math.sqrt(Math.abs(a) / Math.PI);
+          let sx = p.start[0], sy = p.start[1], k = 1; for (const g of p.segs) { sx += g.x; sy += g.y; k++; }
+          cx = sx / k; cy = sy / k;
+        }
+        if (r <= rMax) small.push({ li, pi, cx, cy, r, p });
+      });
+    });
+    const C = rMax * 10, grid = new Map();
+    small.forEach((d, j) => { const key = Math.floor(d.cx / C) + ',' + Math.floor(d.cy / C); if (!grid.has(key)) grid.set(key, []); grid.get(key).push(j); });
+    const drop = new Set();
+    small.forEach((d, j) => {
+      let peers = 0;
+      for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) for (const k of grid.get((Math.floor(d.cx / C) + dx) + ',' + (Math.floor(d.cy / C) + dy)) || []) {
+        if (k === j) continue;
+        const e = small[k];
+        if (Math.abs(e.r - d.r) < Math.max(d.r, e.r) * 0.5 && Math.hypot(e.cx - d.cx, e.cy - d.cy) < Math.max(d.r, e.r) * 8) peers++;
+      }
+      // 큰 도형 안(글자 구멍 안 점 등)은 유지
+      const inside = v.layers.some((l) => l.paths.some((q) => q !== d.p && !q.circle && !q.ellipse && Math.abs(signedArea(q)) > Math.PI * d.r * d.r * 30 && inBox(q, d.cx, d.cy)));
+      // 다른 원(고리) 안 가운데 점도 유지
+      const inRing = v.layers.some((l) => l.paths.some((q) => q !== d.p && q.circle && q.circle.r > d.r * 1.5 && Math.hypot(q.circle.cx - d.cx, q.circle.cy - d.cy) < q.circle.r));
+      if (peers < 2 && !inside && !inRing) drop.add(d.li + ':' + d.pi);
+    });
+    v.layers.forEach((l, li) => { l.paths = l.paths.filter((_, pi) => !drop.has(li + ':' + pi)); });
+  }
   // 잔흔 제거: 잉크색 면 중 원이 아닌 작은 조각(점·찌꺼기)은 버린다
   {
     const inkHex = stacked.find((it) => it.ink)?.color;
@@ -780,6 +896,9 @@ export function vectorize(items, w, h, o, progress = () => {}) {
       }
       const sc = centers.length ? snapConcentric(c, centers) : null;
       if (sc && sc.full) { shapes.push({ kind: 'circle', cx: sc.cx, cy: sc.cy, r: sc.R }); continue; }
+      // 공통 기준: 작고 길쭉한 도형은 반듯한 직사각형 또는 캡슐로
+      const bar = fitBar(c, Math.sqrt(w * h) * 0.03);
+      if (bar) { shapes.push(bar); continue; }
       shapes.push(analyzeContour(c, { ...o, step: c.length / c.n }));
     }
     allShapes.push(...shapes);
