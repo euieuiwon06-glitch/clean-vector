@@ -3,7 +3,7 @@
 // 2) 뼈대를 끝점·교차점 사이 선들로 나눠
 // 3) 직선은 그림의 주요 방향으로 정렬한 선분, 곡선은 매끈한 베지어로 맞추고
 // 4) 선마다 원본 단면에서 굵기·진하기를 재서 일정한 굵기의 획으로 만든다.
-import { fitCubic } from './fit.js?v=812688a5';
+import { fitCubic } from './fit.js?v=b90317d6';
 
 const DEG = Math.PI / 180;
 
@@ -859,6 +859,7 @@ export function extractStrokes(m, w, h, o = {}) {
   // 두꺼운 핵 → 원래 크기로 되돌린 영역 = 면
   const core = new Uint8Array(w * h);
   for (let i = 0; i < w * h; i++) core[i] = D[i] > maxHalf ? 1 : 0;
+
   // 선이 겹쳐 잠깐 두꺼워진 작은 핵(8px 미만)은 면으로 보지 않는다
   {
     const seen = new Uint8Array(w * h), st = [], cells = [];

@@ -1,8 +1,8 @@
-import { compositeOnWhite, buildPalette, unmix, denoise } from './palette.js?v=812688a5';
-import { unifyRepeats } from './repeat.js?v=812688a5';
-import { extractStrokes, inkCoverage, chainStrokes, pruneIsolated, dedupeParallel, rebuildDashes } from './strokes.js?v=812688a5';
-import { maskBounds, upsample, gaussianBlur, preserveThin, marchingSquares } from './contour.js?v=812688a5';
-import { resampleClosed, analyzeContour, alignRuns, equalizeStrokes, buildPath, fitCircle, snapConcentric } from './fit.js?v=812688a5';
+import { compositeOnWhite, buildPalette, unmix, denoise } from './palette.js?v=b90317d6';
+import { unifyRepeats } from './repeat.js?v=b90317d6';
+import { extractStrokes, inkCoverage, chainStrokes, pruneIsolated, dedupeParallel, rebuildDashes } from './strokes.js?v=b90317d6';
+import { maskBounds, upsample, gaussianBlur, preserveThin, marchingSquares } from './contour.js?v=b90317d6';
+import { resampleClosed, analyzeContour, alignRuns, equalizeStrokes, buildPath, fitCircle, snapConcentric } from './fit.js?v=b90317d6';
 
 export const DEFAULTS = {
   colors: 'auto',   // 대표색 개수(숫자 또는 auto)
@@ -339,6 +339,54 @@ function fitBar(c, maxLen) {
   return { kind: 'path', start: p1, segs };
 }
 
+function snapFillsToStrokes(layers, strokes, sc) {
+  const segs = [];
+  for (const st of strokes) {
+    if (st.dash) continue;
+    let p = st.start;
+    for (const g of st.segs) {
+      if (g.t === 'L') segs.push([p, [g.x, g.y], st.width]);
+      else { let q = p; for (let i = 1; i <= 6; i++) { const t = i / 6, u = 1 - t; const r = [u * u * u * p[0] + 3 * u * u * t * g.x1 + 3 * u * t * t * g.x2 + t * t * t * g.x, u * u * u * p[1] + 3 * u * u * t * g.y1 + 3 * u * t * t * g.y2 + t * t * t * g.y]; segs.push([q, r, st.width]); q = r; } }
+      p = [g.x, g.y];
+    }
+  }
+  const C = 12 * sc, grid = new Map();
+  segs.forEach((sg, j) => {
+    const [a, b] = sg;
+    for (let x = Math.floor(Math.min(a[0], b[0]) / C); x <= Math.floor(Math.max(a[0], b[0]) / C); x++)
+      for (let y = Math.floor(Math.min(a[1], b[1]) / C); y <= Math.floor(Math.max(a[1], b[1]) / C); y++) { const k = x + ',' + y; if (!grid.has(k)) grid.set(k, []); grid.get(k).push(j); }
+  });
+  const near = (x, y) => {
+    let best = null, bd = Infinity;
+    for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) for (const j of grid.get((Math.floor(x / C) + dx) + ',' + (Math.floor(y / C) + dy)) || []) {
+      const [a, b, wd] = segs[j];
+      const sx = b[0] - a[0], sy = b[1] - a[1], l2 = sx * sx + sy * sy || 1;
+      const t = Math.max(0, Math.min(1, ((x - a[0]) * sx + (y - a[1]) * sy) / l2));
+      const px = a[0] + sx * t, py = a[1] + sy * t, d = Math.hypot(x - px, y - py);
+      if (d < wd / 2 + 3.5 * sc && d < bd) { bd = d; best = [px, py]; }
+    }
+    return best;
+  };
+  for (const l of layers) {
+    l.paths = l.paths.map((p) => {
+      if (p.circle || p.ellipse) return p;
+      const mv = (x, y) => { const q = near(x, y); return q ? [q[0] - x, q[1] - y] : [0, 0]; };
+      const d0 = mv(p.start[0], p.start[1]);
+      const start = [p.start[0] + d0[0], p.start[1] + d0[1]];
+      let prev = d0;
+      const segs2 = p.segs.map((g) => {
+        const d = mv(g.x, g.y);
+        const r = g.t === 'C'
+          ? { t: 'C', x1: g.x1 + prev[0], y1: g.y1 + prev[1], x2: g.x2 + d[0], y2: g.y2 + d[1], x: g.x + d[0], y: g.y + d[1] }
+          : { t: 'L', x: g.x + d[0], y: g.y + d[1] };
+        prev = d;
+        return r;
+      });
+      return { ...p, start, segs: segs2 };
+    });
+  }
+}
+
 function signedArea(p) {
   let a = 0, q = p.start;
   for (const g of p.segs) { a += q[0] * g.y - g.x * q[1]; q = [g.x, g.y]; }
@@ -666,6 +714,7 @@ export function trace(input, opts = {}, progress = () => {}) {
     strokes = rebuildDashes(strokes, 16 * scl, 1.6 * scl);
     strokes = pruneIsolated(strokes, 14 * scl, 1.5 * scl, cov, w, h);
     stacked[inkIdx] = { ...ink, mask: r.fillMask };
+    if (o.debugFill) o.debugFill(stacked.map((it) => ({ color: it.color, mask: it.mask })));
   }
   const inkStrokeCount = strokes.length;
   // 공통 기준: 잉크가 아닌 다른 색도 가는 선은 가운데 획 하나로(밝은 선·색 선 모두)
@@ -689,6 +738,7 @@ export function trace(input, opts = {}, progress = () => {}) {
     });
   }
   const v = vectorize(stacked, w, h, o, progress);
+  if (o.debugV) o.debugV(v, 'after vectorize');
   if (strokes.length && v.centers?.length) snapStrokeCircles(strokes, v.centers);
   // 공통 기준: 원(점) 위·바로 옆을 지나는 짧은 선 조각은 지운다(도형 우선)
   if (strokes.length) {
@@ -803,10 +853,13 @@ export function trace(input, opts = {}, progress = () => {}) {
       const inside = v.layers.some((l) => l.paths.some((q) => q !== d.p && !q.circle && !q.ellipse && Math.abs(signedArea(q)) > Math.PI * d.r * d.r * 30 && inBox(q, d.cx, d.cy)));
       // 다른 원(고리) 안 가운데 점도 유지
       const inRing = v.layers.some((l) => l.paths.some((q) => q !== d.p && q.circle && q.circle.r > d.r * 1.5 && Math.hypot(q.circle.cx - d.cx, q.circle.cy - d.cy) < q.circle.r));
-      if (!d.keep && peers < 2 && !inside && !inRing) drop.add(d.li + ':' + d.pi);
+      // 같은 레이어의 다른 도형 안에 있는 원 = 구멍(흰 뚜껑 등)일 수 있으니 유지
+      const isHole = d.p.circle && v.layers[d.li].paths.some((q) => q !== d.p && !q.circle && !q.ellipse && Math.abs(signedArea(q)) > Math.PI * d.r * d.r && inBox(q, d.cx, d.cy));
+      if (!d.keep && peers < 2 && !inside && !inRing && !isHole) drop.add(d.li + ':' + d.pi);
     });
     v.layers.forEach((l, li) => { l.paths = l.paths.filter((_, pi) => !drop.has(li + ':' + pi)); });
   }
+  if (o.debugV) o.debugV(v, 'before residue');
   // 잔흔 제거: 잉크색 면 중 원이 아닌 작은 조각(점·찌꺼기)은 버린다
   {
     const inkHex = stacked.find((it) => it.ink)?.color;
@@ -835,6 +888,9 @@ export function trace(input, opts = {}, progress = () => {}) {
       });
     }
   }
+  // 공통 기준: 면 테두리가 선 가까이(선 반폭 + 여유) 있으면 선 한가운데로 붙인다.
+  // 그림자·색 면 경계가 선 밑으로 정확히 들어가 선과 애매하게 겹치지 않는다.
+  if (strokes.length) snapFillsToStrokes(v.layers.filter((l) => !strokes.some((st) => st.color === l.color)), strokes, Math.max(1, Math.sqrt((w * h) / 1.5e6)));
   progress('완료', 1);
   return {
     mode: 'graphic',
@@ -881,7 +937,8 @@ export function vectorize(items, w, h, o, progress = () => {}) {
       cnt.set(l, (cnt.get(l) || 0) + 1); tot++;
     }
     let mx = 0; for (const v of cnt.values()) mx = Math.max(mx, v);
-    return tot > 0 && mx < tot * 0.75;
+    // 둘레 대부분이 자기 색이면(구멍) 경계 얼룩이 아니다
+    return tot >= 12 && mx < tot * 0.75;
   };
   // 작은 원(점·마커 중심)을 먼저 찾아 기준 중심으로 삼는다
   const centers = [];
