@@ -3,7 +3,7 @@
 // 2) 뼈대를 끝점·교차점 사이 선들로 나눠
 // 3) 직선은 그림의 주요 방향으로 정렬한 선분, 곡선은 매끈한 베지어로 맞추고
 // 4) 선마다 원본 단면에서 굵기·진하기를 재서 일정한 굵기의 획으로 만든다.
-import { fitCubic } from './fit.js?v=b90317d6';
+import { fitCubic } from './fit.js?v=cde754e6';
 
 const DEG = Math.PI / 180;
 
@@ -1467,7 +1467,8 @@ export function rebuildDashes(strokes, maxLen, tol) {
         const base = (cx - c.mx) * c.ux + (cy - c.my) * c.uy;
         const ox = cx - c.ux * base, oy = cy - c.uy * base;
         const main = run.reduce((p, q) => (q.st.width > p.st.width ? q : p)).st;
-        out.push({ ...main, start: [ox + c.ux * t0, oy + c.uy * t0], segs: [{ t: 'L', x: ox + c.ux * t1, y: oy + c.uy * t1 }], dash: [dash, gap], cap: 'butt', closed: false });
+        // 점선은 아주 얇은 실선 하나로
+        out.push({ ...main, start: [ox + c.ux * t0, oy + c.uy * t0], segs: [{ t: 'L', x: ox + c.ux * t1, y: oy + c.uy * t1 }], width: Math.max(0.5, main.width * 0.5), thinLine: true, cap: 'round', closed: false });
         for (const d of run) { used.add(d.k); dead.add(d.k); }
       }
     };
@@ -1479,4 +1480,38 @@ export function rebuildDashes(strokes, maxLen, tol) {
     flush();
   }
   return strokes.filter((_, k) => !dead.has(k)).concat(out);
+}
+
+// 선을 면 마스크로 그린다(색별). 둥근 끝·둥근 이음, 가장자리 반투명(거리 기반)
+export function rasterizeStrokes(strokes, w, h, minW = 1.4) {
+  const layers = new Map();
+  for (const st of strokes) {
+    if (!layers.has(st.color)) layers.set(st.color, new Float32Array(w * h));
+    const m = layers.get(st.color);
+    const hw = Math.max(minW, st.width) / 2;
+    const pts = [st.start];
+    let p = st.start;
+    for (const g of st.segs) {
+      if (g.t === 'L') pts.push([g.x, g.y]);
+      else { const n = Math.max(4, Math.ceil(Math.hypot(g.x - p[0], g.y - p[1]) / 2)); for (let i = 1; i <= n; i++) { const t = i / n, u = 1 - t; pts.push([u * u * u * p[0] + 3 * u * u * t * g.x1 + 3 * u * t * t * g.x2 + t * t * t * g.x, u * u * u * p[1] + 3 * u * u * t * g.y1 + 3 * u * t * t * g.y2 + t * t * t * g.y]); } }
+      p = [g.x, g.y];
+    }
+    if (st.closed) pts.push(st.start);
+    for (let k = 0; k < pts.length - 1; k++) {
+      const a = pts[k], b = pts[k + 1];
+      const x0 = Math.max(0, Math.floor(Math.min(a[0], b[0]) - hw - 1)), x1 = Math.min(w - 1, Math.ceil(Math.max(a[0], b[0]) + hw + 1));
+      const y0 = Math.max(0, Math.floor(Math.min(a[1], b[1]) - hw - 1)), y1 = Math.min(h - 1, Math.ceil(Math.max(a[1], b[1]) + hw + 1));
+      const sx = b[0] - a[0], sy = b[1] - a[1], l2 = sx * sx + sy * sy || 1e-9;
+      for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) {
+        const px = x + 0.5, py = y + 0.5;
+        const t = Math.max(0, Math.min(1, ((px - a[0]) * sx + (py - a[1]) * sy) / l2));
+        const d = Math.hypot(px - a[0] - sx * t, py - a[1] - sy * t);
+        const v = hw + 0.5 - d;
+        if (v <= 0) continue;
+        const i = y * w + x, c = v > 1 ? 1 : v;
+        if (c > m[i]) m[i] = c;
+      }
+    }
+  }
+  return layers;
 }

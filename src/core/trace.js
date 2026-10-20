@@ -1,8 +1,8 @@
-import { compositeOnWhite, buildPalette, unmix, denoise } from './palette.js?v=b90317d6';
-import { unifyRepeats } from './repeat.js?v=b90317d6';
-import { extractStrokes, inkCoverage, chainStrokes, pruneIsolated, dedupeParallel, rebuildDashes } from './strokes.js?v=b90317d6';
-import { maskBounds, upsample, gaussianBlur, preserveThin, marchingSquares } from './contour.js?v=b90317d6';
-import { resampleClosed, analyzeContour, alignRuns, equalizeStrokes, buildPath, fitCircle, snapConcentric } from './fit.js?v=b90317d6';
+import { compositeOnWhite, buildPalette, unmix, denoise } from './palette.js?v=cde754e6';
+import { unifyRepeats } from './repeat.js?v=cde754e6';
+import { extractStrokes, inkCoverage, chainStrokes, pruneIsolated, dedupeParallel, rebuildDashes, rasterizeStrokes } from './strokes.js?v=cde754e6';
+import { maskBounds, upsample, gaussianBlur, preserveThin, marchingSquares } from './contour.js?v=cde754e6';
+import { resampleClosed, analyzeContour, alignRuns, equalizeStrokes, buildPath, fitCircle, snapConcentric } from './fit.js?v=cde754e6';
 
 export const DEFAULTS = {
   colors: 'auto',   // 대표색 개수(숫자 또는 auto)
@@ -338,6 +338,8 @@ function fitBar(c, maxLen) {
   ];
   return { kind: 'path', start: p1, segs };
 }
+
+const lumHex = (hx) => { const c = [1, 3, 5].map((i) => parseInt(hx.slice(i, i + 2), 16)); return 0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2]; };
 
 function snapFillsToStrokes(layers, strokes, sc) {
   const segs = [];
@@ -891,6 +893,18 @@ export function trace(input, opts = {}, progress = () => {}) {
   // 공통 기준: 면 테두리가 선 가까이(선 반폭 + 여유) 있으면 선 한가운데로 붙인다.
   // 그림자·색 면 경계가 선 밑으로 정확히 들어가 선과 애매하게 겹치지 않는다.
   if (strokes.length) snapFillsToStrokes(v.layers.filter((l) => !strokes.some((st) => st.color === l.color)), strokes, Math.max(1, Math.sqrt((w * h) / 1.5e6)));
+  // 공통 기준: 선도 모두 닫힌 패스로. 같은 색 선들을 한 면으로 합친 뒤 윤곽을 다시 따서
+  // 교차·이음새가 겹치지 않는 하나의 닫힌 도형이 되게 한다(맨 위에 그림).
+  if (strokes.length && o.outlineStrokes !== false) {
+    progress('선 정리', 0.92);
+    const sc = Math.max(1, Math.sqrt((w * h) / 1.5e6));
+    const rl = rasterizeStrokes(strokes, w, h, sc > 1.3 ? 1.4 * sc : 0.9);
+    const order = [...rl.keys()].sort((a, b) => lumHex(b) - lumHex(a)); // 밝은 선 먼저, 진한 선이 위
+    const lv = vectorize(order.map((color) => ({ color, mask: rl.get(color) })), w, h, { ...o, blur: 0.35, thin: false, align: true, strokes: false }, () => {});
+    for (const l of lv.layers) { l.line = true; v.layers.push(l); }
+    v.stats.anchors += lv.stats.anchors; v.stats.paths += lv.stats.paths;
+    strokes = [];
+  }
   progress('완료', 1);
   return {
     mode: 'graphic',
@@ -1071,7 +1085,8 @@ export function toSVG(res, { background = true, hrefs = {}, outW = res.width, ou
   for (const l of res.layers) {
     if (!l.paths.length) continue;
     // 틈 메우기: 맨 위가 아닌 면은 같은 색 테두리로 조금 넓혀 다음 면 아래로 겹치게 한다
-    const isTop = l === lastFill;
+    // 맨 위 면, 선 레이어, 선과 같은 색의 면(글자 등)은 넓히지 않는다
+    const isTop = l === lastFill || l.line || res.layers.some((q) => q.line && q.color === l.color) || (!res.layers.some((q) => q.line) ? false : l === [...res.layers].filter((q) => !q.line && q.paths.length).pop());
     const seam = isTop ? '' : ` stroke="${l.color}" stroke-width="${seamW}" stroke-linejoin="round"`;
     out.push(`<path fill="${l.color}" fill-rule="evenodd"${seam} d="${l.paths.map(pathData).join('')}"/>`);
   }
