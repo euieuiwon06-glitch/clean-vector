@@ -1,8 +1,8 @@
-import { compositeOnWhite, buildPalette, unmix, denoise } from './palette.js?v=82e71258';
-import { unifyRepeats } from './repeat.js?v=82e71258';
-import { extractStrokes, inkCoverage, chainStrokes, pruneIsolated, dedupeParallel, rebuildDashes } from './strokes.js?v=82e71258';
-import { maskBounds, upsample, gaussianBlur, preserveThin, marchingSquares } from './contour.js?v=82e71258';
-import { resampleClosed, analyzeContour, alignRuns, equalizeStrokes, buildPath, fitCircle, snapConcentric } from './fit.js?v=82e71258';
+import { compositeOnWhite, buildPalette, unmix, denoise } from './palette.js?v=28854573';
+import { unifyRepeats } from './repeat.js?v=28854573';
+import { extractStrokes, inkCoverage, chainStrokes, pruneIsolated, dedupeParallel, rebuildDashes } from './strokes.js?v=28854573';
+import { maskBounds, upsample, gaussianBlur, preserveThin, marchingSquares } from './contour.js?v=28854573';
+import { resampleClosed, analyzeContour, alignRuns, equalizeStrokes, buildPath, fitCircle, snapConcentric } from './fit.js?v=28854573';
 
 export const DEFAULTS = {
   colors: 'auto',   // 대표색 개수(숫자 또는 auto)
@@ -545,6 +545,16 @@ export function trace(input, opts = {}, progress = () => {}) {
   const o = { ...DEFAULTS, ...opts };
   const t0 = Date.now();
   let img = compositeOnWhite(input);
+  // 공통 기준: 허용 오차·최소 크기는 이미지 크기에 비례(확대한 이미지에서 잔물결까지 따라가지 않게)
+  {
+    const k = Math.max(1, Math.sqrt((input.width * input.height) / 1.5e6));
+    if (k > 1) {
+      for (const key of ['lineTol', 'cornerTol', 'curveTol', 'minRun', 'circleTol', 'alignTol', 'strokeTol']) o[key] = (opts[key] ?? DEFAULTS[key]) * k;
+      o.curveTol *= 1.3; // 곡선은 조금 더 매끈하게
+      o.minArea = (opts.minArea ?? DEFAULTS.minArea) * k * k;
+      o.tolScale = k;
+    }
+  }
   // 반복 형태 통일: 비슷한 작은 물체는 겹쳐 만든 대표 모양으로 바꿔 넣는다(큰 창 → 작은 창 순)
   if (o.unify === true) { // 실험 중: 기본 꺼짐
     progress('반복 형태 찾기', 0.03);
@@ -558,6 +568,8 @@ export function trace(input, opts = {}, progress = () => {}) {
   let photos = [];
   if (o.photo) {
     photos = detectPhotos(img, o.photoBlocks || photoBlocks(img));
+    // 사진 영역이 이미지 절반 이상이면(3D 렌더 등) 원본으로 남기지 않고 전체를 벡터로
+    if (photos.reduce((t, r) => t + r.w * r.h, 0) > w * h * 0.5) photos = [];
     if (photos.length) {
       // 사진 영역을 빼고 대표색을 다시 뽑는다
       const bgc = palette[um.bg];
@@ -629,7 +641,7 @@ export function trace(input, opts = {}, progress = () => {}) {
     // 선 아래로 색 면을 이어 칠한다: 선을 빼도 초록 면에 구멍(흰 테두리)이 남지 않게
     fillUnderInk(stacked.filter((it) => !it.ink), cov, w, h);
     if (o.debugCov) o.debugCov(cov);
-    const r = extractStrokes(cov, w, h, { lineTol: 0.75, snapDeg: 8, binTh: 0.2, maxHalf: 2.2 * Math.max(1, Math.sqrt((w * h) / 1.5e6)) });
+    const r = extractStrokes(cov, w, h, { lineTol: 0.75 * (o.tolScale || 1), curveTol: 0.6 * (o.tolScale || 1), snapDeg: 8, binTh: 0.2, maxHalf: 2.2 * Math.max(1, Math.sqrt((w * h) / 1.5e6)) });
     const bc = palette[bg], ic = ink.rgb;
     // 색은 검정·회색 두 가지, 굵기는 길이 가중 2~3단계로 통일
     const gray = hex(ic.map((v, k) => Math.round(bc[k] + (v - bc[k]) * 0.5)));
@@ -664,7 +676,7 @@ export function trace(input, opts = {}, progress = () => {}) {
       if (it.ink) return;
       let cnt = 0; for (let i = 0; i < w * h; i++) if (it.mask[i] > 0.5) cnt++;
       if (cnt < 50) return;
-      const r2 = extractStrokes(it.mask, w, h, { lineTol: 0.75, snapDeg: 8, binTh: 0.35, maxHalf: 2.2 * scl2, wideRidge: true });
+      const r2 = extractStrokes(it.mask, w, h, { lineTol: 0.75 * (o.tolScale || 1), curveTol: 0.6 * (o.tolScale || 1), snapDeg: 8, binTh: 0.35, maxHalf: 2.2 * scl2, wideRidge: true });
       if (!r2.strokes.length) return;
       for (const st of r2.strokes) st.width *= 0.95;
       const lv = widthLevels(r2.strokes);
