@@ -3,7 +3,7 @@
 // 2) 뼈대를 끝점·교차점 사이 선들로 나눠
 // 3) 직선은 그림의 주요 방향으로 정렬한 선분, 곡선은 매끈한 베지어로 맞추고
 // 4) 선마다 원본 단면에서 굵기·진하기를 재서 일정한 굵기의 획으로 만든다.
-import { fitCubic } from './fit.js?v=ae7e2850';
+import { fitCubic } from './fit.js?v=7c953b71';
 
 const DEG = Math.PI / 180;
 
@@ -11,6 +11,28 @@ function bil(m, w, h, x, y) {
   const x0 = Math.max(0, Math.min(w - 1, Math.floor(x))), y0 = Math.max(0, Math.min(h - 1, Math.floor(y)));
   const x1 = Math.min(w - 1, x0 + 1), y1 = Math.min(h - 1, y0 + 1), fx = x - x0, fy = y - y0;
   return (m[y0 * w + x0] * (1 - fx) + m[y0 * w + x1] * fx) * (1 - fy) + (m[y1 * w + x0] * (1 - fx) + m[y1 * w + x1] * fx) * fy;
+}
+
+// 가우시안 근사(상자 흐림 3번, 누적합) — 큰 흐림도 픽셀 수에 비례한 시간
+function fastBlur(f, W, H, sg) {
+  const r = Math.max(1, Math.round(Math.sqrt((12 * sg * sg) / 3 + 1) / 2 - 0.5));
+  const inv = 1 / (2 * r + 1);
+  // 한 줄(start, stride, len)을 상자 흐림
+  const line = (src, dst, start, stride, len) => {
+    let acc = src[start] * (r + 1);
+    for (let k = 1; k <= r; k++) acc += src[start + Math.min(len - 1, k) * stride];
+    for (let i = 0; i < len; i++) {
+      dst[start + i * stride] = acc * inv;
+      const add = i + r + 1 < len ? i + r + 1 : len - 1, sub = i - r > 0 ? i - r : 0;
+      acc += src[start + add * stride] - src[start + sub * stride];
+    }
+  };
+  let a = Float32Array.from(f), b = new Float32Array(W * H);
+  for (let it = 0; it < 3; it++) {
+    for (let y = 0; y < H; y++) line(a, b, y * W, 1, W);
+    for (let x = 0; x < W; x++) line(b, a, x, W, H);
+  }
+  return a;
 }
 
 function gblur(f, W, H, sg) {
@@ -917,23 +939,33 @@ export function extractStrokes(m, w, h, o = {}) {
       up[Y * W3 + X] = (m[y0 * w + x0] * (1 - fx) + m[y0 * w + x1] * fx) * (1 - fy) + (m[y1 * w + x0] * (1 - fx) + m[y1 * w + x1] * fx) * fy;
     }
   }
-  const G = gblur(up, W3, H3, 1.1);
+  // 가는 선(작은 흐림)과 굵은 선(굵기에 맞춘 큰 흐림) 두 번 능선을 찾아 합친다.
+  // 굵은 선은 가운데가 평평해서 작은 흐림으로는 중심이 안 잡힌다.
   const RG = new Uint8Array(W3 * H3);
-  for (let Y = 2; Y < H3 - 2; Y++) for (let X = 2; X < W3 - 2; X++) {
-    const i = Y * W3 + X;
-    if (G[i] < 0.14) continue;
-    if (!thinB[((Y / U) | 0) * w + ((X / U) | 0)] && !thinB[(Math.round(Y / U - 0.5)) * w + Math.round(X / U - 0.5)]) continue;
-    const gxx = G[i - 1] - 2 * G[i] + G[i + 1], gyy = G[i - W3] - 2 * G[i] + G[i + W3];
-    const gxy = (G[i - W3 - 1] + G[i + W3 + 1] - G[i - W3 + 1] - G[i + W3 - 1]) / 4;
-    // 가장 크게 휘는 방향(선을 가로지르는 방향)
-    const tr2 = (gxx + gyy) / 2, det = Math.sqrt(((gxx - gyy) / 2) ** 2 + gxy * gxy);
-    const l1 = tr2 - det; // 더 음수인 고유값
-    if (l1 > -0.0012) continue;
-    let nx = gxy, ny = l1 - gxx;
-    if (Math.abs(nx) + Math.abs(ny) < 1e-9) { nx = l1 - gyy; ny = gxy; }
-    const nl = Math.hypot(nx, ny) || 1; nx /= nl; ny /= nl;
-    const s1 = bil(G, W3, H3, X + nx, Y + ny), s2 = bil(G, W3, H3, X - nx, Y - ny);
-    if (G[i] >= s1 && G[i] >= s2) RG[i] = 1;
+  const ridge = (G, curv) => {
+    for (let Y = 2; Y < H3 - 2; Y++) for (let X = 2; X < W3 - 2; X++) {
+      const i = Y * W3 + X;
+      if (G[i] < 0.14) continue;
+      if (!thinB[((Y / U) | 0) * w + ((X / U) | 0)] && !thinB[(Math.round(Y / U - 0.5)) * w + Math.round(X / U - 0.5)]) continue;
+      const gxx = G[i - 1] - 2 * G[i] + G[i + 1], gyy = G[i - W3] - 2 * G[i] + G[i + W3];
+      const gxy = (G[i - W3 - 1] + G[i + W3 + 1] - G[i - W3 + 1] - G[i + W3 - 1]) / 4;
+      const tr2 = (gxx + gyy) / 2, det = Math.sqrt(((gxx - gyy) / 2) ** 2 + gxy * gxy);
+      const l1 = tr2 - det;
+      if (l1 > -curv) continue;
+      let nx = gxy, ny = l1 - gxx;
+      if (Math.abs(nx) + Math.abs(ny) < 1e-9) { nx = l1 - gyy; ny = gxy; }
+      const nl = Math.hypot(nx, ny) || 1; nx /= nl; ny /= nl;
+      const s1 = bil(G, W3, H3, X + nx, Y + ny), s2 = bil(G, W3, H3, X - nx, Y - ny);
+      if (G[i] >= s1 && G[i] >= s2) RG[i] = 1;
+    }
+  };
+  ridge(gblur(up, W3, H3, 1.1), 0.0012);
+  const sgW = Math.max(1.1, maxHalf * U * 0.45);
+  if (o.wideRidge && sgW > 1.6) ridge(fastBlur(up, W3, H3, sgW), 0.0012 * (1.1 / sgW) ** 2);
+  // 두 결과가 1~2칸 어긋나 붙으면 세선화에서 하나로 합쳐지도록 살짝 넓힌다
+  if (o.wideRidge && sgW > 1.6) {
+    const t = RG.slice();
+    for (let Y = 1; Y < H3 - 1; Y++) for (let X = 1; X < W3 - 1; X++) if (t[Y * W3 + X]) { RG[Y * W3 + X + 1] = 1; RG[(Y + 1) * W3 + X] = 1; }
   }
   const S = thin(RG, W3, H3);
   const tr = traceSkeleton(S, W3, H3);

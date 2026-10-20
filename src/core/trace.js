@@ -1,8 +1,8 @@
-import { compositeOnWhite, buildPalette, unmix, denoise } from './palette.js?v=ae7e2850';
-import { unifyRepeats } from './repeat.js?v=ae7e2850';
-import { extractStrokes, inkCoverage, chainStrokes, pruneIsolated, dedupeParallel, rebuildDashes } from './strokes.js?v=ae7e2850';
-import { maskBounds, upsample, gaussianBlur, preserveThin, marchingSquares } from './contour.js?v=ae7e2850';
-import { resampleClosed, analyzeContour, alignRuns, equalizeStrokes, buildPath, fitCircle, snapConcentric } from './fit.js?v=ae7e2850';
+import { compositeOnWhite, buildPalette, unmix, denoise } from './palette.js?v=7c953b71';
+import { unifyRepeats } from './repeat.js?v=7c953b71';
+import { extractStrokes, inkCoverage, chainStrokes, pruneIsolated, dedupeParallel, rebuildDashes } from './strokes.js?v=7c953b71';
+import { maskBounds, upsample, gaussianBlur, preserveThin, marchingSquares } from './contour.js?v=7c953b71';
+import { resampleClosed, analyzeContour, alignRuns, equalizeStrokes, buildPath, fitCircle, snapConcentric } from './fit.js?v=7c953b71';
 
 export const DEFAULTS = {
   colors: 'auto',   // 대표색 개수(숫자 또는 auto)
@@ -568,6 +568,27 @@ export function trace(input, opts = {}, progress = () => {}) {
     strokes = pruneIsolated(strokes, 14 * scl, 1.5 * scl, cov, w, h);
     stacked[inkIdx] = { ...ink, mask: r.fillMask };
   }
+  const inkStrokeCount = strokes.length;
+  // 공통 기준: 잉크가 아닌 다른 색도 가는 선은 가운데 획 하나로(밝은 선·색 선 모두)
+  // 선 색 = 이미지에서 가는 선을 그리는 색: 어두운 잉크가 있으면 그것(위에서 처리), 없으면(어두운 바탕 등) 나머지 색들
+  if (o.centerline !== false && inkIdx < 0) {
+    const scl2 = Math.max(1, Math.sqrt((w * h) / 1.5e6));
+    stacked.forEach((it, idx) => {
+      if (it.ink) return;
+      let cnt = 0; for (let i = 0; i < w * h; i++) if (it.mask[i] > 0.5) cnt++;
+      if (cnt < 50) return;
+      const r2 = extractStrokes(it.mask, w, h, { lineTol: 0.75, snapDeg: 8, binTh: 0.35, maxHalf: 2.2 * scl2, wideRidge: true });
+      if (!r2.strokes.length) return;
+      for (const st of r2.strokes) st.width *= 0.95;
+      const lv = widthLevels(r2.strokes);
+      let add = r2.strokes.map((st) => ({ ...st, color: it.color, width: lv.reduce((a, b) => (Math.abs(b - st.width) < Math.abs(a - st.width) ? b : a)) }));
+      add = rebuildDashes(add, 16 * scl2, 1.6 * scl2);
+      add = chainStrokes(add, 6 * scl2);
+      add = add.filter((st) => { let L = 0, p = st.start; for (const g of st.segs) { L += Math.hypot(g.x - p[0], g.y - p[1]); p = [g.x, g.y]; } return st.closed || L >= 5 * scl2; });
+      strokes.push(...add);
+      stacked[idx] = { ...it, mask: r2.fillMask };
+    });
+  }
   const v = vectorize(stacked, w, h, o, progress);
   if (strokes.length && v.centers?.length) snapStrokeCircles(strokes, v.centers);
   // 공통 기준: 원(점) 위·바로 옆을 지나는 짧은 선 조각은 지운다(도형 우선)
@@ -593,7 +614,7 @@ export function trace(input, opts = {}, progress = () => {}) {
     }
   }
   // 선 둘레 회색 띠 제거: 채도 낮은 중간색 면 조각 중 대부분이 잉크 선 2.5px(배율) 안에 있는 것은 버린다
-  if (strokes.length) {
+  if (inkStrokeCount) {
     const sc = Math.max(1, Math.sqrt((w * h) / 1.5e6));
     const near = new Uint8Array(w * h);
     const R = Math.ceil(2.5 * sc);
@@ -626,7 +647,7 @@ export function trace(input, opts = {}, progress = () => {}) {
     }
   }
   // 얇은 색 조각 제거: 선 둘레 번짐이 남은 가늘고 긴 색 조각(평균 폭이 1.2px·배율 미만)은 버린다
-  if (strokes.length) {
+  if (inkStrokeCount) {
     const sc = Math.max(1, Math.sqrt((w * h) / 1.5e6));
     const inkHex0 = stacked.find((it) => it.ink)?.color;
     for (const l of v.layers) {
@@ -702,8 +723,23 @@ export function vectorize(items, w, h, o, progress = () => {}) {
       if (c.area < o.minArea) continue;
       cs.push(c);
     }
-    pending.push({ color, cs, bounds: b });
+    pending.push({ color, cs, bounds: b, k: li });
   });
+  // 색 라벨(경계 점 판정용): 가장 진한 마스크 색, 없으면 -1(배경)
+  const lab = new Int8Array(w * h).fill(-1);
+  items.forEach(({ mask }, k) => { for (let i = 0; i < w * h; i++) if (mask[i] > 0.5) lab[i] = k; });
+  const ringMixed = (cx, cy, r, self) => {
+    const cnt = new Map(); let tot = 0;
+    const rr = r + Math.max(1.5, r * 0.4);
+    for (let a = 0; a < 24; a++) {
+      const x = Math.round(cx + Math.cos(a * Math.PI / 12) * rr), y = Math.round(cy + Math.sin(a * Math.PI / 12) * rr);
+      if (x < 0 || y < 0 || x >= w || y >= h) continue;
+      const l = lab[y * w + x]; if (l === self) continue;
+      cnt.set(l, (cnt.get(l) || 0) + 1); tot++;
+    }
+    let mx = 0; for (const v of cnt.values()) mx = Math.max(mx, v);
+    return tot > 0 && mx < tot * 0.75;
+  };
   // 작은 원(점·마커 중심)을 먼저 찾아 기준 중심으로 삼는다
   const centers = [];
   for (const L of pending) for (const c of L.cs) {
@@ -727,6 +763,15 @@ export function vectorize(items, w, h, o, progress = () => {}) {
         const iso = (4 * Math.PI * c.area) / (c.length * c.length);
         const req = Math.sqrt(c.area / Math.PI);
         if (iso > 0.86 && req <= Math.max(6, Math.sqrt(w * h) * 0.02)) {
+          let mx0 = 0, my0 = 0;
+          for (let i = 0; i < c.n; i++) { mx0 += c.xs[i]; my0 += c.ys[i]; }
+          mx0 /= c.n; my0 /= c.n;
+          // 두 색 경계에 걸친 작은 얼룩은 점이 아니다: 아주 작으면 버리고, 아니면 일반 도형으로
+          if (ringMixed(mx0, my0, req, L.k)) {
+            if (req < Math.max(3, Math.sqrt(w * h) * 0.004)) continue;
+            shapes.push(analyzeContour(c, { ...o, step: c.length / c.n }));
+            continue;
+          }
           let mx = 0, my = 0;
           for (let i = 0; i < c.n; i++) { mx += c.xs[i]; my += c.ys[i]; }
           shapes.push({ kind: 'circle', cx: mx / c.n, cy: my / c.n, r: req });
@@ -817,9 +862,15 @@ export function toSVG(res, { background = true, hrefs = {}, outW = res.width, ou
     const h = hrefs.photos?.[i];
     if (h) out.push(`<image x="${r.x}" y="${r.y}" width="${r.w}" height="${r.h}" href="${h}"/>`);
   });
+  const fills = res.layers.filter((l) => l.paths.length);
+  const lastFill = fills[fills.length - 1];
+  const seamW = Math.round(Math.max(1, Math.sqrt((res.width * res.height) / 1.5e6)) * 1.2 * 100) / 100;
   for (const l of res.layers) {
     if (!l.paths.length) continue;
-    out.push(`<path fill="${l.color}" fill-rule="evenodd" d="${l.paths.map(pathData).join('')}"/>`);
+    // 틈 메우기: 맨 위가 아닌 면은 같은 색 테두리로 조금 넓혀 다음 면 아래로 겹치게 한다
+    const isTop = l === lastFill;
+    const seam = isTop ? '' : ` stroke="${l.color}" stroke-width="${seamW}" stroke-linejoin="round"`;
+    out.push(`<path fill="${l.color}" fill-rule="evenodd"${seam} d="${l.paths.map(pathData).join('')}"/>`);
   }
   if (res.strokes?.length) {
     const groups = new Map();
