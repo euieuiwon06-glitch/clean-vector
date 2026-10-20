@@ -1,8 +1,8 @@
-import { compositeOnWhite, buildPalette, unmix, denoise } from './palette.js?v=2f22beb2';
-import { unifyRepeats } from './repeat.js?v=2f22beb2';
-import { extractStrokes, inkCoverage } from './strokes.js?v=2f22beb2';
-import { maskBounds, upsample, gaussianBlur, preserveThin, marchingSquares } from './contour.js?v=2f22beb2';
-import { resampleClosed, analyzeContour, alignRuns, equalizeStrokes, buildPath, fitCircle, snapConcentric } from './fit.js?v=2f22beb2';
+import { compositeOnWhite, buildPalette, unmix, denoise } from './palette.js?v=4f4e88f9';
+import { unifyRepeats } from './repeat.js?v=4f4e88f9';
+import { extractStrokes, inkCoverage } from './strokes.js?v=4f4e88f9';
+import { maskBounds, upsample, gaussianBlur, preserveThin, marchingSquares } from './contour.js?v=4f4e88f9';
+import { resampleClosed, analyzeContour, alignRuns, equalizeStrokes, buildPath, fitCircle, snapConcentric } from './fit.js?v=4f4e88f9';
 
 export const DEFAULTS = {
   colors: 'auto',   // 대표색 개수(숫자 또는 auto)
@@ -631,8 +631,9 @@ export function pathData(p) {
 }
 
 // hrefs: { photos: [사진 영역 data URI], plate: 배경 사진, shades: [{ mul, scr }] }
-export function toSVG(res, { background = true, hrefs = {} } = {}) {
-  const out = [`<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 ${res.width} ${res.height}" width="${res.width}" height="${res.height}">`];
+// outW/outH: 확대해서 변환했을 때 원래 크기로 보이게(좌표는 확대 기준 그대로)
+export function toSVG(res, { background = true, hrefs = {}, outW = res.width, outH = res.height } = {}) {
+  const out = [`<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 ${res.width} ${res.height}" width="${outW}" height="${outH}">`];
   if (res.mode === 'overlay') {
     if (hrefs.plate) out.push(`<image id="photo" width="${res.width}" height="${res.height}" href="${hrefs.plate}"/>`);
     res.layers.forEach((l, i) => {

@@ -1,6 +1,7 @@
 // 변환은 워커에서: 화면이 멈추지 않게
-import { toSVG } from './core/trace.js?v=2f22beb2';
-import { convert } from './core/overlay.js?v=2f22beb2';
+import { toSVG } from './core/trace.js?v=4f4e88f9';
+import { convert, decideMode } from './core/overlay.js?v=4f4e88f9';
+import { upscale2x } from './core/upscale.js?v=4f4e88f9';
 
 async function encode(w, h, rgba, type = 'image/png', quality) {
   const c = new OffscreenCanvas(w, h);
@@ -51,12 +52,20 @@ function collectAnchors(res) {
 
 self.onmessage = async (e) => {
   const { id, image, mode } = e.data;
+  const t0 = Date.now();
   const opts = { background: true, photoFormat: 'image/jpeg' };
   try {
     const progress = (label, p) => self.postMessage({ id, type: 'progress', label, p });
-    const res = convert(image, mode, progress);
+    // 그래픽은 AI 2배 확대 후 변환(큰 이미지는 생략, 실패하면 원본으로)
+    const m = decideMode(image, mode);
+    let src = image, k = 1, aiNote = '';
+    if (m === 'graphic' && image.width * image.height <= 2_600_000) {
+      try { progress('AI 확대 준비', 0.01); src = await upscale2x(image, progress); k = 2; }
+      catch (err) { aiNote = 'AI 확대 실패: ' + (err && err.message || err); }
+    }
+    const res = convert(src, m, progress);
     const hrefs = { photos: [], shades: [] };
-    const { width: W, data } = image;
+    const { width: W, data } = src;
     for (const r of res.photos || []) {
       const d = new Uint8ClampedArray(r.w * r.h * 4);
       for (let y = 0; y < r.h; y++) d.set(data.subarray(((r.y + y) * W + r.x) * 4, ((r.y + y) * W + r.x + r.w) * 4), y * r.w * 4);
@@ -69,11 +78,12 @@ self.onmessage = async (e) => {
         scr: sh.scr && (await encode(sh.w, sh.h, tint(sh.w, sh.h, sh.scr, true))),
       } : null);
     }
-    const svg = toSVG(res, { background: opts.background, hrefs });
+    const svg = toSVG(res, { background: opts.background, hrefs, outW: image.width, outH: image.height });
     const { anchors, handles } = collectAnchors(res);
+    if (k !== 1) { for (let i = 0; i < anchors.length; i++) anchors[i] /= k; for (let i = 0; i < handles.length; i++) handles[i] /= k; }
     self.postMessage({
       id, type: 'done', svg, anchors, handles,
-      info: { mode: res.mode, stats: res.stats, palette: res.palette, background: res.background, photos: res.photos || [], targets: res.targets || [], width: res.width, height: res.height },
+      info: { mode: res.mode, ai: k > 1, aiNote, stats: { ...res.stats, ms: Date.now() - t0 }, palette: res.palette, background: res.background, photos: res.photos || [], targets: res.targets || [], width: res.width, height: res.height },
     }, [anchors.buffer, handles.buffer]);
   } catch (err) {
     self.postMessage({ id, type: 'error', message: String(err && err.stack || err) });

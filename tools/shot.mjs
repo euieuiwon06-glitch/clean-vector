@@ -15,7 +15,7 @@ await page.reload({ waitUntil: 'networkidle0' });
 if (process.env.MODE) await page.click(`#mode button[data-v="${process.env.MODE}"]`);
 const input = await page.$('#file');
 await input.uploadFile(path.resolve(file));
-await page.waitForFunction(() => !document.querySelector('#save').disabled, { timeout: 120000 });
+await page.waitForFunction(() => !document.querySelector('#save').disabled, { timeout: 600000 });
 await page.click(`#view button[data-v="${view}"]`);
 if (process.env.ZOOM) {
   // ZOOM=화면x,화면y,단계  (마우스 휠로 확대)

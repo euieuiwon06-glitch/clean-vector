@@ -24,7 +24,7 @@ seg('#mode', (v) => { mode = v; run(); });
 // ---------- 변환 ----------
 let worker = null, busy = false, jobId = 0, timer = 0;
 function makeWorker() {
-  worker = new Worker(new URL('./worker.js?v=2f22beb2', import.meta.url), { type: 'module' });
+  worker = new Worker(new URL('./worker.js?v=4f4e88f9', import.meta.url), { type: 'module' });
   worker.onmessage = onWorker;
 }
 makeWorker();
@@ -63,6 +63,7 @@ function renderInfo(m) {
   const st = m.info.stats;
   $('#stats').innerHTML = `<span>패스 <b>${st.paths.toLocaleString()}</b></span><span>앵커 <b>${st.anchors.toLocaleString()}</b></span>` +
     `<span>용량 <b>${kb >= 1024 ? (kb / 1024).toFixed(1) + 'MB' : Math.round(kb) + 'KB'}</b></span><span>${(st.ms / 1000).toFixed(1)}초</span>` +
+    (m.info.ai ? '<span>AI 확대 적용</span>' : '') + (m.info.aiNote ? `<span>${m.info.aiNote}</span>` : '') +
     (m.info.mode === 'overlay' ? `<span>${mode === 'auto' ? '자동 → ' : ''}사진+그래픽: 사진은 원본, 그래픽만 벡터</span>` : `<span>${mode === 'auto' ? '자동 → ' : ''}그래픽만${m.info.photos.length ? ` · 사진 영역 <b>${m.info.photos.length}</b>곳은 원본 유지` : ''}</span>`);
 }
 

@@ -1,8 +1,8 @@
 // 사진 위 그래픽 모드
 // 사진 속에 합성된 색 그래픽(바닥 사인, 로고 등)만 깨끗한 벡터로 바꾸고,
 // 그 위에 원본에서 뽑은 그림자(곱하기)·반사광(스크린) 레이어를 얹는다. 배경 사진은 그대로 둔다.
-import { compositeOnWhite } from './palette.js?v=2f22beb2';
-import { DEFAULTS, vectorize, trace, photoBlocks } from './trace.js?v=2f22beb2';
+import { compositeOnWhite } from './palette.js?v=4f4e88f9';
+import { DEFAULTS, vectorize, trace, photoBlocks } from './trace.js?v=4f4e88f9';
 
 const LIN = new Float32Array(256);
 for (let i = 0; i < 256; i++) { const v = i / 255; LIN[i] = v <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4; }
@@ -372,6 +372,13 @@ export function traceOverlay(input, opts = {}, progress = () => {}) {
 
 // 변환 진입점. mode: 'auto' | 'graphic'(그래픽만) | 'overlay'(사진+그래픽)
 // 자동: 사진 블록이 30% 넘고 채도 높은 그래픽 색이 있으면 사진+그래픽, 아니면 그래픽만(사진 영역은 원본 유지)
+// 자동 모드가 어떤 방식을 고를지 미리 판단(그래픽이면 AI 확대를 먼저 한다)
+export function decideMode(input, mode = 'auto') {
+  if (mode !== 'auto') return mode;
+  const img = compositeOnWhite(input);
+  return photoBlocks(img).coverage > 0.3 && autoTargets(img).length ? 'overlay' : 'graphic';
+}
+
 export function convert(input, mode = 'auto', progress = () => {}) {
   const img = compositeOnWhite(input);
   const pb = photoBlocks(img);
