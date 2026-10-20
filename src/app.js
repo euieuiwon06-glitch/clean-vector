@@ -24,7 +24,7 @@ seg('#mode', (v) => { mode = v; run(); });
 // ---------- 변환 ----------
 let worker = null, busy = false, jobId = 0, timer = 0;
 function makeWorker() {
-  worker = new Worker(new URL('./worker.js?v=4f4e88f9', import.meta.url), { type: 'module' });
+  worker = new Worker(new URL('./worker.js?v=c3507fa7', import.meta.url), { type: 'module' });
   worker.onmessage = onWorker;
 }
 makeWorker();

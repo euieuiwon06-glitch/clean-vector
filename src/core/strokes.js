@@ -3,7 +3,7 @@
 // 2) 뼈대를 끝점·교차점 사이 선들로 나눠
 // 3) 직선은 그림의 주요 방향으로 정렬한 선분, 곡선은 매끈한 베지어로 맞추고
 // 4) 선마다 원본 단면에서 굵기·진하기를 재서 일정한 굵기의 획으로 만든다.
-import { fitCubic } from './fit.js?v=4f4e88f9';
+import { fitCubic } from './fit.js?v=c3507fa7';
 
 const DEG = Math.PI / 180;
 
@@ -1183,3 +1183,213 @@ export function extractStrokes(m, w, h, o = {}) {
 
 const norm2 = (x, y) => { const l = Math.hypot(x, y) || 1; return [x / l, y / l]; };
 const dist2 = (a, b) => Math.hypot(a[0] - b[0], a[1] - b[1]);
+
+// ---------- 마무리: 이어지는 선 합치기 ----------
+function reverseStroke(st) {
+  const pts = [st.start, ...st.segs.map((g) => [g.x, g.y])];
+  const segs = [];
+  for (let i = st.segs.length - 1; i >= 0; i--) {
+    const g = st.segs[i], to = pts[i];
+    segs.push(g.t === 'C' ? { t: 'C', x1: g.x2, y1: g.y2, x2: g.x1, y2: g.y1, x: to[0], y: to[1] } : { t: 'L', x: to[0], y: to[1] });
+  }
+  return { ...st, start: pts[pts.length - 1], segs };
+}
+function strokeLen(st) {
+  let p = st.start, L = 0;
+  for (const g of st.segs) { L += Math.hypot(g.x - p[0], g.y - p[1]); p = [g.x, g.y]; }
+  return L;
+}
+// 끝의 바깥 방향(끝점에서 밖으로)
+function endDir(st, atStart) {
+  const pts = [st.start, ...st.segs.map((g) => [g.x, g.y])];
+  let e, q;
+  if (atStart) {
+    e = pts[0]; const g = st.segs[0]; q = g.t === 'C' ? [g.x1, g.y1] : pts[1];
+    if (dist2(e, q) < 0.3) q = pts[Math.min(2, pts.length - 1)];
+  } else {
+    e = pts[pts.length - 1]; const g = st.segs[st.segs.length - 1]; q = g.t === 'C' ? [g.x2, g.y2] : pts[pts.length - 2];
+    if (dist2(e, q) < 0.3) q = pts[Math.max(0, pts.length - 3)];
+  }
+  const l = dist2(e, q) || 1;
+  return { p: e, d: [(e[0] - q[0]) / l, (e[1] - q[1]) / l] };
+}
+
+// 끝과 끝이 가깝고(r 이내) 서로를 향해 자연스럽게 이어지면 한 패스로 합친다.
+// 합친 패스는 굵기·색을 하나로(긴 쪽 기준) — 굵기가 바뀌며 생기던 요철 제거
+export function chainStrokes(strokes, r = 6) {
+  let S = strokes.filter((st) => st.segs.length);
+  for (let pass = 0; pass < 3; pass++) {
+    const ends = [];
+    S.forEach((st, k) => { if (!st.closed && st.cap !== 'butt') for (const a of [true, false]) ends.push({ k, a, ...endDir(st, a) }); });
+    const R3 = r * 3.5; // 긴 직선끼리 한 줄 위면 더 멀리까지 잇는다
+    const C = R3, grid = new Map();
+    const lens = S.map(strokeLen);
+    ends.forEach((e, j) => { const key = Math.floor(e.p[0] / C) + ',' + Math.floor(e.p[1] / C); if (!grid.has(key)) grid.set(key, []); grid.get(key).push(j); });
+    const pairs = [];
+    ends.forEach((A, ja) => {
+      const cx = Math.floor(A.p[0] / C), cy = Math.floor(A.p[1] / C);
+      for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) for (const jb of grid.get((cx + dx) + ',' + (cy + dy)) || []) {
+        if (jb <= ja) continue;
+        const B = ends[jb];
+        if (A.k === B.k) continue;
+        const gx = B.p[0] - A.p[0], gy = B.p[1] - A.p[1], g = Math.hypot(gx, gy);
+        const turn = -(A.d[0] * B.d[0] + A.d[1] * B.d[1]); // 1 = 일직선으로 이어짐
+        if (g > r) {
+          const lat = Math.abs(gx * A.d[1] - gy * A.d[0]);
+          if (!(g <= R3 && turn > 0.996 && lat < r * 0.2 && lens[A.k] >= g * 2.5 && lens[B.k] >= g * 2.5 && (gx * A.d[0] + gy * A.d[1]) > 0)) continue;
+          pairs.push([g, ja, jb]);
+          continue;
+        }
+        if (g < 1.2) { if (turn < Math.cos(70 * Math.PI / 180)) continue; }
+        else {
+          if (turn < Math.cos(45 * Math.PI / 180)) continue;
+          if ((gx * A.d[0] + gy * A.d[1]) / g < 0.6 || (-gx * B.d[0] - gy * B.d[1]) / g < 0.6) continue;
+        }
+        pairs.push([g * 0.5 + (1 - turn) * 4, ja, jb]);
+      }
+    });
+    if (!pairs.length) break;
+    pairs.sort((x, y) => x[0] - y[0]);
+    const usedEnd = new Set(), dead = new Set();
+    const alias = S.map((_, k) => k); // 합쳐진 패스의 새 위치
+    let merged = 0;
+    for (const [, ja, jb] of pairs) {
+      if (usedEnd.has(ja) || usedEnd.has(jb)) continue;
+      const A = ends[ja], B = ends[jb];
+      if (dead.has(A.k) || dead.has(B.k)) continue;
+      // A의 끝 → B의 시작 순서로 만든다
+      let sa = S[A.k], sb = S[B.k];
+      if (A.a) sa = reverseStroke(sa);
+      if (!B.a) sb = reverseStroke(sb);
+      const la = strokeLen(sa), lb = strokeLen(sb);
+      const join = dist2([sa.segs[sa.segs.length - 1].x, sa.segs[sa.segs.length - 1].y], sb.start) > 0.05 ? [{ t: 'L', x: sb.start[0], y: sb.start[1] }] : [];
+      const main = la >= lb ? sa : sb;
+      const m = { ...main, start: sa.start, segs: [...sa.segs, ...join, ...sb.segs], width: main.width, color: main.color, closed: false };
+      if (dist2(m.start, [m.segs[m.segs.length - 1].x, m.segs[m.segs.length - 1].y]) < 0.6 && strokeLen(m) > 10) m.closed = true;
+      S[A.k] = m; dead.add(B.k);
+      // 이번 패스에서 A.k의 다른 끝도 바뀌었으니 더 쓰지 않는다
+      ends.forEach((e, j) => { if (e.k === A.k || e.k === B.k) usedEnd.add(j); });
+      merged++;
+    }
+    S = S.filter((_, k) => !dead.has(k));
+    if (!merged) break;
+  }
+  return S;
+}
+
+// 외톨이 조각 제거: 짧은 선(maxLen 미만)인데 양 끝이 다른 선에 닿지 않고,
+// 같은 줄 위에 반복되는 짧은 선(점선)도 3개 미만이면 지운다. 끊긴 잔흔이 남는 것보다 없는 게 낫다.
+export function pruneIsolated(strokes, maxLen, touch, cov = null, w = 0, h = 0) {
+  const segs = [];
+  strokes.forEach((st, k) => { let p = st.start; for (const g of st.segs) { segs.push([k, p, [g.x, g.y]]); p = [g.x, g.y]; } });
+  const C = Math.max(4, touch * 2), grid = new Map();
+  segs.forEach((sg, j) => {
+    const [, a, b] = sg;
+    for (let x = Math.floor(Math.min(a[0], b[0]) / C); x <= Math.floor(Math.max(a[0], b[0]) / C); x++)
+      for (let y = Math.floor(Math.min(a[1], b[1]) / C); y <= Math.floor(Math.max(a[1], b[1]) / C); y++) { const key = x + ',' + y; if (!grid.has(key)) grid.set(key, []); grid.get(key).push(j); }
+  });
+  const near = (pt, k, r) => {
+    for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) for (const j of grid.get((Math.floor(pt[0] / C) + dx) + ',' + (Math.floor(pt[1] / C) + dy)) || []) {
+      const [kk, a, b] = segs[j];
+      if (kk === k) continue;
+      const sx = b[0] - a[0], sy = b[1] - a[1], l2 = sx * sx + sy * sy || 1;
+      const t = Math.max(0, Math.min(1, ((pt[0] - a[0]) * sx + (pt[1] - a[1]) * sy) / l2));
+      if (Math.hypot(pt[0] - a[0] - sx * t, pt[1] - a[1] - sy * t) < r) return true;
+    }
+    return false;
+  };
+  const shortOnes = [];
+  strokes.forEach((st, k) => { if (!st.closed && strokeLen(st) < maxLen) shortOnes.push(k); });
+  const info = new Map();
+  for (const k of shortOnes) {
+    const st = strokes[k], e = [st.segs[st.segs.length - 1].x, st.segs[st.segs.length - 1].y];
+    const dx = e[0] - st.start[0], dy = e[1] - st.start[1], l = Math.hypot(dx, dy) || 1;
+    info.set(k, { a: st.start, b: e, mx: (st.start[0] + e[0]) / 2, my: (st.start[1] + e[1]) / 2, ux: dx / l, uy: dy / l, len: l });
+  }
+  const drop = new Set();
+  for (const k of shortOnes) {
+    const st = strokes[k], I = info.get(k);
+    const touchA = near(I.a, k, touch), touchB = near(I.b, k, touch);
+    if (touchA || touchB) continue;
+    // 점선 판정: 같은 방향·같은 줄 위(옆으로 1.2·touch 이내), 일정 거리 안의 짧은 선 수
+    let peers = 0;
+    for (const j of shortOnes) {
+      if (j === k) continue;
+      const J = info.get(j);
+      if (Math.abs(I.ux * J.uy - I.uy * J.ux) > 0.2) continue;
+      const ox = J.mx - I.mx, oy = J.my - I.my;
+      if (Math.abs(ox * -I.uy + oy * I.ux) > touch * 1.2) continue;
+      if (Math.hypot(ox, oy) > maxLen * 4) continue;
+      peers++;
+    }
+    if (peers >= 2) continue;
+    // 주변(길이 1.5배 반경)에 다른 선이 여럿 있으면 글자·그림의 일부 — 남긴다
+    const R = Math.max(I.len * 2, touch * 8);
+    const others = new Set();
+    for (let dx = -2; dx <= 2; dx++) for (let dy = -2; dy <= 2; dy++) for (const j of grid.get((Math.floor(I.mx / C) + dx) + ',' + (Math.floor(I.my / C) + dy)) || []) {
+      const [kk, a, b] = segs[j];
+      if (kk === k) continue;
+      const sx = b[0] - a[0], sy = b[1] - a[1], l2 = sx * sx + sy * sy || 1;
+      const t = Math.max(0, Math.min(1, ((I.mx - a[0]) * sx + (I.my - a[1]) * sy) / l2));
+      if (Math.hypot(I.mx - a[0] - sx * t, I.my - a[1] - sy * t) < R) others.add(kk);
+    }
+    if (others.size >= 2) continue;
+    // 원본에서 주변에 잉크(글자 면 등)가 많으면 남긴다
+    if (cov) {
+      let ink = 0;
+      const x0 = Math.max(0, Math.floor(I.mx - R)), x1 = Math.min(w - 1, Math.ceil(I.mx + R)), y0 = Math.max(0, Math.floor(I.my - R)), y1 = Math.min(h - 1, Math.ceil(I.my + R));
+      for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) {
+        if (cov[y * w + x] < 0.5) continue;
+        const px = x + 0.5 - I.a[0], py = y + 0.5 - I.a[1], t = Math.max(0, Math.min(I.len, px * I.ux + py * I.uy));
+        if (Math.hypot(px - I.ux * t, py - I.uy * t) > touch * 2 && !near([x + 0.5, y + 0.5], k, touch * 2)) ink++;
+      }
+      if (ink > touch * touch * 12) continue;
+    }
+    drop.add(k);
+  }
+  return strokes.filter((_, k) => !drop.has(k));
+}
+
+// 중복 선 제거: 다른(더 진하거나 더 긴) 선 바로 옆을 나란히 따라가는 선은 지운다.
+// 흐린 선은 dGray, 진한 선끼리는 dInk 거리 안이면 중복으로 본다.
+export function dedupeParallel(strokes, dInk, dGray) {
+  const segs = [];
+  strokes.forEach((st, k) => { let p = st.start; for (const g of st.segs) { segs.push([k, p, [g.x, g.y]]); p = [g.x, g.y]; } });
+  const C = Math.max(4, dGray * 2), grid = new Map();
+  segs.forEach((sg, j) => {
+    const [, a, b] = sg;
+    for (let x = Math.floor(Math.min(a[0], b[0]) / C); x <= Math.floor(Math.max(a[0], b[0]) / C); x++)
+      for (let y = Math.floor(Math.min(a[1], b[1]) / C); y <= Math.floor(Math.max(a[1], b[1]) / C); y++) { const key = x + ',' + y; if (!grid.has(key)) grid.set(key, []); grid.get(key).push(j); }
+  });
+  const lens = strokes.map(strokeLen);
+  const order = strokes.map((_, k) => k).sort((a, b) => lens[a] - lens[b]); // 짧은 것부터 검사
+  const dead = new Set();
+  for (const k of order) {
+    const st = strokes[k];
+    if (st.closed) continue;
+    const pts = [];
+    let p = st.start;
+    for (const g of st.segs) { const q = [g.x, g.y], n = Math.max(1, Math.ceil(dist2(p, q) / 1.5)); for (let i = 0; i < n; i++) pts.push([p[0] + (q[0] - p[0]) * i / n, p[1] + (q[1] - p[1]) * i / n]); p = q; }
+    pts.push(p);
+    let cover = 0;
+    for (const pt of pts) {
+      let hit = false;
+      for (let dx = -1; dx <= 1 && !hit; dx++) for (let dy = -1; dy <= 1 && !hit; dy++) for (const j of grid.get((Math.floor(pt[0] / C) + dx) + ',' + (Math.floor(pt[1] / C) + dy)) || []) {
+        const [kk, a, b] = segs[j];
+        if (kk === k || dead.has(kk)) continue;
+        const o = strokes[kk];
+        // 기준 선: 진한 선이거나(흐린 선 검사 시), 더 긴 진한 선(진한 선 검사 시)
+        const isGray = !!st.gray;
+        if (!isGray) continue; // 진한 선은 지우지 않는다(글자 획 보호)
+        const r = isGray ? (o.gray ? dInk : dGray) : dInk;
+        if (isGray && o.gray && lens[kk] < lens[k]) continue;
+        const sx = b[0] - a[0], sy = b[1] - a[1], l2 = sx * sx + sy * sy || 1;
+        const t = Math.max(0, Math.min(1, ((pt[0] - a[0]) * sx + (pt[1] - a[1]) * sy) / l2));
+        if (Math.hypot(pt[0] - a[0] - sx * t, pt[1] - a[1] - sy * t) < r) hit = true;
+      }
+      if (hit) cover++;
+    }
+    if (cover >= pts.length * 0.7) dead.add(k);
+  }
+  return strokes.filter((_, k) => !dead.has(k));
+}

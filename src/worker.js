@@ -1,7 +1,7 @@
 // 변환은 워커에서: 화면이 멈추지 않게
-import { toSVG } from './core/trace.js?v=4f4e88f9';
-import { convert, decideMode } from './core/overlay.js?v=4f4e88f9';
-import { upscale2x } from './core/upscale.js?v=4f4e88f9';
+import { toSVG } from './core/trace.js?v=c3507fa7';
+import { convert, decideMode } from './core/overlay.js?v=c3507fa7';
+import { upscale2x } from './core/upscale.js?v=c3507fa7';
 
 async function encode(w, h, rgba, type = 'image/png', quality) {
   const c = new OffscreenCanvas(w, h);

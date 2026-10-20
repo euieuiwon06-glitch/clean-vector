@@ -1,8 +1,8 @@
-import { compositeOnWhite, buildPalette, unmix, denoise } from './palette.js?v=4f4e88f9';
-import { unifyRepeats } from './repeat.js?v=4f4e88f9';
-import { extractStrokes, inkCoverage } from './strokes.js?v=4f4e88f9';
-import { maskBounds, upsample, gaussianBlur, preserveThin, marchingSquares } from './contour.js?v=4f4e88f9';
-import { resampleClosed, analyzeContour, alignRuns, equalizeStrokes, buildPath, fitCircle, snapConcentric } from './fit.js?v=4f4e88f9';
+import { compositeOnWhite, buildPalette, unmix, denoise } from './palette.js?v=c3507fa7';
+import { unifyRepeats } from './repeat.js?v=c3507fa7';
+import { extractStrokes, inkCoverage, chainStrokes, pruneIsolated, dedupeParallel } from './strokes.js?v=c3507fa7';
+import { maskBounds, upsample, gaussianBlur, preserveThin, marchingSquares } from './contour.js?v=c3507fa7';
+import { resampleClosed, analyzeContour, alignRuns, equalizeStrokes, buildPath, fitCircle, snapConcentric } from './fit.js?v=c3507fa7';
 
 export const DEFAULTS = {
   colors: 'auto',   // 대표색 개수(숫자 또는 auto)
@@ -239,6 +239,24 @@ function cleanRegions(masks, palette, bg, w, h, img) {
 }
 
 // 선이 이미 찾은 원(마커 점 등)과 같은 중심을 돌면 그 부분을 정확한 원호로 바꾼다
+function inBox(p, x, y) {
+  let x0 = p.start[0], x1 = x0, y0 = p.start[1], y1 = y0;
+  for (const g of p.segs) { if (g.x < x0) x0 = g.x; if (g.x > x1) x1 = g.x; if (g.y < y0) y0 = g.y; if (g.y > y1) y1 = g.y; }
+  return x > x0 && x < x1 && y > y0 && y < y1;
+}
+
+function signedArea(p) {
+  let a = 0, q = p.start;
+  for (const g of p.segs) { a += q[0] * g.y - g.x * q[1]; q = [g.x, g.y]; }
+  return (a + q[0] * p.start[1] - p.start[0] * q[1]) / 2;
+}
+// 레이어의 바깥 윤곽 방향(가장 큰 윤곽의 부호). 반대 부호 = 구멍
+function outerSign(paths) {
+  let best = 0, sg = 1;
+  for (const p of paths) { if (p.circle || p.ellipse) continue; const a = signedArea(p); if (Math.abs(a) > best) { best = Math.abs(a); sg = Math.sign(a) || 1; } }
+  return sg;
+}
+
 function snapStrokeCircles(strokes, centers) {
   const flat = (st) => {
     const pts = [st.start];
@@ -502,7 +520,7 @@ export function trace(input, opts = {}, progress = () => {}) {
     // 선 아래로 색 면을 이어 칠한다: 선을 빼도 초록 면에 구멍(흰 테두리)이 남지 않게
     fillUnderInk(stacked.filter((it) => !it.ink), cov, w, h);
     if (o.debugCov) o.debugCov(cov);
-    const r = extractStrokes(cov, w, h, { lineTol: 0.75, snapDeg: 8, binTh: 0.2 });
+    const r = extractStrokes(cov, w, h, { lineTol: 0.75, snapDeg: 8, binTh: 0.2, maxHalf: 2.2 * Math.max(1, Math.sqrt((w * h) / 1.5e6)) });
     const bc = palette[bg], ic = ink.rgb;
     // 색은 검정·회색 두 가지, 굵기는 길이 가중 2~3단계로 통일
     const gray = hex(ic.map((v, k) => Math.round(bc[k] + (v - bc[k]) * 0.5)));
@@ -521,10 +539,60 @@ export function trace(input, opts = {}, progress = () => {}) {
       for (const g of st.segs) { L += Math.hypot(g.x - p[0], g.y - p[1]); p = [g.x, g.y]; }
       return L >= 12;
     });
+    const scl = Math.max(1, Math.sqrt((w * h) / 1.5e6));
+    strokes = dedupeParallel(strokes, 1.4 * scl, 3.2 * scl);
+    strokes = chainStrokes(strokes, 6 * scl);
+    strokes = pruneIsolated(strokes, 14 * scl, 1.5 * scl, cov, w, h);
     stacked[inkIdx] = { ...ink, mask: r.fillMask };
   }
   const v = vectorize(stacked, w, h, o, progress);
   if (strokes.length && v.centers?.length) snapStrokeCircles(strokes, v.centers);
+  // 얇은 색 조각 제거: 선 둘레 번짐이 남은 가늘고 긴 색 조각(평균 폭이 1.2px·배율 미만)은 버린다
+  if (strokes.length) {
+    const sc = Math.max(1, Math.sqrt((w * h) / 1.5e6));
+    const inkHex0 = stacked.find((it) => it.ink)?.color;
+    for (const l of v.layers) {
+      if (l.color === inkHex0) continue;
+      const sg0 = outerSign(l.paths);
+      l.paths = l.paths.filter((p) => {
+        if (p.circle || p.ellipse) return true;
+        if (Math.sign(signedArea(p)) !== sg0) return true; // 구멍은 그대로
+        let a = 0, per = 0, q = p.start;
+        for (const g of p.segs) { a += q[0] * g.y - g.x * q[1]; per += Math.hypot(g.x - q[0], g.y - q[1]); q = [g.x, g.y]; }
+        a += q[0] * p.start[1] - p.start[0] * q[1]; per += Math.hypot(p.start[0] - q[0], p.start[1] - q[1]);
+        a = Math.abs(a) / 2;
+        return !(per > 0 && (2 * a) / per < 1.2 * sc && a < 400 * sc * sc);
+      });
+    }
+  }
+  // 잔흔 제거: 잉크색 면 중 원이 아닌 작은 조각(점·찌꺼기)은 버린다
+  {
+    const inkHex = stacked.find((it) => it.ink)?.color;
+    const k2 = Math.max(1, (w * h) / 1.5e6);
+    const minA = 8 * k2;
+    for (const l of v.layers) {
+      if (l.color !== inkHex) continue;
+      // 작은 점(원)은 비슷한 점이 가까이 반복될 때만 남긴다(아이콘의 ··· 같은 것)
+      const sgInk = outerSign(l.paths);
+      const dots = l.paths.filter((p) => p.circle && p.circle.r < 4 * Math.sqrt(k2)).map((p) => p.circle);
+      l.paths = l.paths.filter((p) => {
+        if (p.circle && p.circle.r < 4 * Math.sqrt(k2)) {
+          const c = p.circle;
+          // 다른 도형 안에 있으면(글자 구멍 등) 남긴다
+          if (l.paths.some((q) => q !== p && !q.circle && !q.ellipse && inBox(q, c.cx, c.cy))) return true;
+          // 고리(다른 원과 중심이 같음)의 일부면 남긴다
+          if (l.paths.some((q) => q !== p && q.circle && Math.hypot(q.circle.cx - c.cx, q.circle.cy - c.cy) < Math.max(q.circle.r, c.r))) return true;
+          return dots.some((d) => d !== c && Math.abs(d.r - c.r) < c.r * 0.4 && Math.hypot(d.cx - c.cx, d.cy - c.cy) < c.r * 8);
+        }
+        if (p.circle || p.ellipse) return true;
+        if (Math.sign(signedArea(p)) !== sgInk) return true; // 구멍은 그대로
+        let a = 0, q = p.start;
+        for (const g of p.segs) { a += q[0] * g.y - g.x * q[1]; q = [g.x, g.y]; }
+        a += q[0] * p.start[1] - p.start[0] * q[1];
+        return Math.abs(a) / 2 >= minA;
+      });
+    }
+  }
   progress('완료', 1);
   return {
     mode: 'graphic',
