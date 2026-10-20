@@ -1,8 +1,8 @@
-import { compositeOnWhite, buildPalette, unmix, denoise } from './palette.js?v=0ed6980e';
-import { unifyRepeats } from './repeat.js?v=0ed6980e';
-import { extractStrokes, inkCoverage, chainStrokes, pruneIsolated, dedupeParallel, rebuildDashes } from './strokes.js?v=0ed6980e';
-import { maskBounds, upsample, gaussianBlur, preserveThin, marchingSquares } from './contour.js?v=0ed6980e';
-import { resampleClosed, analyzeContour, alignRuns, equalizeStrokes, buildPath, fitCircle, snapConcentric } from './fit.js?v=0ed6980e';
+import { compositeOnWhite, buildPalette, unmix, denoise } from './palette.js?v=82e71258';
+import { unifyRepeats } from './repeat.js?v=82e71258';
+import { extractStrokes, inkCoverage, chainStrokes, pruneIsolated, dedupeParallel, rebuildDashes } from './strokes.js?v=82e71258';
+import { maskBounds, upsample, gaussianBlur, preserveThin, marchingSquares } from './contour.js?v=82e71258';
+import { resampleClosed, analyzeContour, alignRuns, equalizeStrokes, buildPath, fitCircle, snapConcentric } from './fit.js?v=82e71258';
 
 export const DEFAULTS = {
   colors: 'auto',   // 대표색 개수(숫자 또는 auto)
@@ -82,7 +82,17 @@ function detectPhotos(img, pb) {
       }
     }
     if (core >= Math.max(8, bw * bh * 0.01)) {
-      rects.push({ x: x0 * B, y: y0 * B, w: Math.min(w, (x1 + 1) * B) - x0 * B, h: Math.min(h, (y1 + 1) * B) - y0 * B });
+      const r = { x: x0 * B, y: y0 * B, w: Math.min(w, (x1 + 1) * B) - x0 * B, h: Math.min(h, (y1 + 1) * B) - y0 * B };
+      // 질감(러그·종이 결 등)은 사진이 아니다: 8px 블록 평균 밝기의 폭(10~90%)이 넓어야 사진.
+      // 블록 평균이라 가는 윤곽선 영향은 작다. 실측: 러그 53, 사진·3D 렌더 160 이상
+      const bm = [];
+      for (let by = r.y; by + 8 <= r.y + r.h; by += 8) for (let bx = r.x; bx + 8 <= r.x + r.w; bx += 8) {
+        let a = 0;
+        for (let y = by; y < by + 8; y += 2) for (let x = bx; x < bx + 8; x += 2) { const i = (y * w + x) * 4; a += img.data[i] * 0.299 + img.data[i + 1] * 0.587 + img.data[i + 2] * 0.114; }
+        bm.push(a / 16);
+      }
+      bm.sort((p, q) => p - q);
+      if (bm.length && bm[Math.floor(bm.length * 0.9)] - bm[Math.floor(bm.length * 0.1)] >= 100) rects.push(r);
     }
   }
   return rects;
