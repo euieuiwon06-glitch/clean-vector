@@ -1,7 +1,7 @@
 // 변환은 워커에서: 화면이 멈추지 않게
-import { toSVG } from './core/trace.js?v=cde754e6';
-import { convert, decideMode } from './core/overlay.js?v=cde754e6';
-import { upscale2x } from './core/upscale.js?v=cde754e6';
+import { toSVG } from './core/trace.js?v=a1dd2d7e';
+import { convert, decideMode } from './core/overlay.js?v=a1dd2d7e';
+import { upscale2x } from './core/upscale.js?v=a1dd2d7e';
 
 async function encode(w, h, rgba, type = 'image/png', quality) {
   const c = new OffscreenCanvas(w, h);
@@ -51,7 +51,7 @@ function collectAnchors(res) {
 }
 
 self.onmessage = async (e) => {
-  const { id, image, mode } = e.data;
+  const { id, image, mode, lines = 'fill' } = e.data;
   const t0 = Date.now();
   const opts = { background: true, photoFormat: 'image/jpeg' };
   try {
@@ -63,7 +63,7 @@ self.onmessage = async (e) => {
       try { progress('AI 확대 준비', 0.01); src = await upscale2x(image, progress); k = 2; }
       catch (err) { aiNote = 'AI 확대 실패: ' + (err && err.message || err); }
     }
-    const res = convert(src, m, progress);
+    const res = convert(src, m, progress, { outlineStrokes: lines !== 'stroke' });
     const hrefs = { photos: [], shades: [] };
     const { width: W, data } = src;
     for (const r of res.photos || []) {

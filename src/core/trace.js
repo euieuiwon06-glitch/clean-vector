@@ -1,8 +1,8 @@
-import { compositeOnWhite, buildPalette, unmix, denoise } from './palette.js?v=cde754e6';
-import { unifyRepeats } from './repeat.js?v=cde754e6';
-import { extractStrokes, inkCoverage, chainStrokes, pruneIsolated, dedupeParallel, rebuildDashes, rasterizeStrokes } from './strokes.js?v=cde754e6';
-import { maskBounds, upsample, gaussianBlur, preserveThin, marchingSquares } from './contour.js?v=cde754e6';
-import { resampleClosed, analyzeContour, alignRuns, equalizeStrokes, buildPath, fitCircle, snapConcentric } from './fit.js?v=cde754e6';
+import { compositeOnWhite, buildPalette, unmix, denoise } from './palette.js?v=a1dd2d7e';
+import { unifyRepeats } from './repeat.js?v=a1dd2d7e';
+import { extractStrokes, inkCoverage, chainStrokes, pruneIsolated, dedupeParallel, rebuildDashes, rasterizeStrokes } from './strokes.js?v=a1dd2d7e';
+import { maskBounds, upsample, gaussianBlur, preserveThin, marchingSquares } from './contour.js?v=a1dd2d7e';
+import { resampleClosed, analyzeContour, alignRuns, equalizeStrokes, buildPath, fitCircle, snapConcentric } from './fit.js?v=a1dd2d7e';
 
 export const DEFAULTS = {
   colors: 'auto',   // 대표색 개수(숫자 또는 auto)
@@ -549,6 +549,8 @@ function flattenFaces(masks, palette, bg, ink, cov, w, h, img) {
       if (!bl || soft < bl * 0.5) continue;
       // 옅은 틴트 얼룩은 면 절반 미만이면, 그 외 색은 면의 30% 미만·작은 조각일 때만 면 색으로
       const replace = (pale[c] && (M === bg || pale[M]) && A < px.length * 0.5) || (A < px.length * 0.3 && A < n * 0.003);
+      // 면 안의 작은 다른 색 조각(면의 12% 미만)은 경계가 또렷해도 면 색으로 — 단색 면 유지
+      if (!replace && A < px.length * 0.12 && A < n * 0.002) { for (const q of comp) { masks[M][q] = Math.min(1, masks[M][q] + masks[c][q]); masks[c][q] = 0; } continue; }
       if (!replace) continue;
       for (const q of comp) { masks[M][q] = Math.min(1, masks[M][q] + masks[c][q]); masks[c][q] = 0; }
     }
@@ -708,13 +710,13 @@ export function trace(input, opts = {}, progress = () => {}) {
       if (!st.gray || st.closed) return true;
       let p = st.start, L = 0;
       for (const g of st.segs) { L += Math.hypot(g.x - p[0], g.y - p[1]); p = [g.x, g.y]; }
-      return L >= 12;
+      return L >= 12 * Math.max(1, Math.sqrt((w * h) / 1.5e6));
     });
     const scl = Math.max(1, Math.sqrt((w * h) / 1.5e6));
     strokes = dedupeParallel(strokes, 1.4 * scl, 3.2 * scl);
     strokes = chainStrokes(strokes, 6 * scl);
     strokes = rebuildDashes(strokes, 16 * scl, 1.6 * scl);
-    strokes = pruneIsolated(strokes, 14 * scl, 1.5 * scl, cov, w, h);
+    strokes = pruneIsolated(strokes, 22 * scl, 1.5 * scl, cov, w, h);
     stacked[inkIdx] = { ...ink, mask: r.fillMask };
     if (o.debugFill) o.debugFill(stacked.map((it) => ({ color: it.color, mask: it.mask })));
   }

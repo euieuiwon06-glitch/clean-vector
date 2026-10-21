@@ -7,7 +7,7 @@
   <meta name="description" content="PNG를 깨끗한 패스의 SVG로. 수평·수직 직선, 정확한 코너와 원호, 매끈한 곡선." />
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23111'/%3E%3Cpath d='M8 23V9h7a7 7 0 0 1 0 14' fill='none' stroke='%23fff' stroke-width='3'/%3E%3Ccircle cx='8' cy='23' r='2.6' fill='%23fff'/%3E%3C/svg%3E" />
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/variable/pretendardvariable-dynamic-subset.min.css" />
-  <link rel="stylesheet" href="styles.css?v=cde754e6" />
+  <link rel="stylesheet" href="styles.css?v=a1dd2d7e" />
 </head>
 <body>
   <header class="bar">
@@ -35,6 +35,11 @@
         <button data-v="vec" class="on"><kbd>2</kbd>결과</button>
         <button data-v="wipe"><kbd>3</kbd>비교</button>
         <button data-v="path"><kbd>4</kbd>패스</button>
+      </div>
+      <p class="side-label side-gap">선 내보내기</p>
+      <div class="vseg" id="lines" role="radiogroup" aria-orientation="vertical">
+        <button data-v="fill" class="on" title="선을 닫힌 면으로: 겹침·이음새 없는 깨끗한 윤곽">닫힌 면</button>
+        <button data-v="stroke" title="선을 선(stroke)으로: 일러스트레이터에서 굵기를 숫자로 조절">선 · 굵기 조절</button>
       </div>
       <div class="status" id="status"></div>
     </aside>
@@ -64,6 +69,6 @@
       </div>
     </section>
   </main>
-  <script type="module" src="src/app.js?v=cde754e6"></script>
+  <script type="module" src="src/app.js?v=a1dd2d7e"></script>
 </body>
 </html>

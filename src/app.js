@@ -20,11 +20,16 @@ function seg(id, onChange) {
 const setView = seg('#view', (v) => { view = v; applyView(); });
 let mode = 'auto';
 seg('#mode', (v) => { mode = v; run(); });
+// 선 내보내기: fill = 닫힌 면(겹침 없는 깨끗한 윤곽), stroke = 선(일러스트레이터에서 굵기 조절)
+let lines = 'fill';
+try { lines = localStorage.getItem('clean-vector:lines') || 'fill'; } catch {}
+const setLines = seg('#lines', (v) => { lines = v; try { localStorage.setItem('clean-vector:lines', v); } catch {} run(); });
+setLines(lines);
 
 // ---------- 변환 ----------
 let worker = null, busy = false, jobId = 0, timer = 0;
 function makeWorker() {
-  worker = new Worker(new URL('./worker.js?v=cde754e6', import.meta.url), { type: 'module' });
+  worker = new Worker(new URL('./worker.js?v=a1dd2d7e', import.meta.url), { type: 'module' });
   worker.onmessage = onWorker;
 }
 makeWorker();
@@ -34,7 +39,7 @@ function run() {
   busy = true;
   const id = ++jobId;
   progress(0.02, '변환 중');
-  worker.postMessage({ id, image: { width: image.width, height: image.height, data: image.data }, mode });
+  worker.postMessage({ id, image: { width: image.width, height: image.height, data: image.data }, mode, lines });
 }
 function onWorker(e) {
   const m = e.data;

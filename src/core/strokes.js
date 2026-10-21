@@ -3,7 +3,7 @@
 // 2) 뼈대를 끝점·교차점 사이 선들로 나눠
 // 3) 직선은 그림의 주요 방향으로 정렬한 선분, 곡선은 매끈한 베지어로 맞추고
 // 4) 선마다 원본 단면에서 굵기·진하기를 재서 일정한 굵기의 획으로 만든다.
-import { fitCubic } from './fit.js?v=cde754e6';
+import { fitCubic } from './fit.js?v=a1dd2d7e';
 
 const DEG = Math.PI / 180;
 
@@ -677,8 +677,8 @@ function finalizeEnds(strokes, r) {
   strokes.forEach((st, k) => {
     if (st.closed || st.cap === 'butt') return;
     const pts = flat(st), L = lenOf(pts);
-    if (L >= 5) return;
-    if (L < 2.5) { drop.add(k); return; }
+    if (L >= r * 1.6) return; // 꼬다리 기준도 배율 비례
+    if (L < r * 0.5) { drop.add(k); return; }
     for (const e of [pts[0], pts[pts.length - 1]]) {
       for (const j of grid.get(Math.floor(e[0] / C) + ',' + Math.floor(e[1] / C)) || []) {
         const [kk, a, b] = segs[j];
@@ -976,10 +976,11 @@ export function extractStrokes(m, w, h, o = {}) {
     .map((p) => p.map((i) => [((i % W3) + 0.5) / U, (((i / W3) | 0) + 0.5) / U]));
   // 3배 격자 점은 촘촘하므로 원래 간격(약 1px)으로 솎는다
   paths = paths.map((p) => p.filter((_, k) => k % U === 0 || k === p.length - 1));
-  paths = bridgeGaps(paths, 2.5);
-  paths = bridgeGaps(paths, 9, (x, y) => sample(m, w, h, x, y));
+  const esc = Math.max(1, maxHalf / 2.2); // 이미지 배율(확대 이미지면 2 안팎)
+  paths = bridgeGaps(paths, 2.5 * esc);
+  paths = bridgeGaps(paths, 9 * esc, (x, y) => sample(m, w, h, x, y));
   paths = paths.map(straightenEnds);
-  paths = extendEnds(paths, 3.5);
+  paths = extendEnds(paths, 3.5 * esc);
 
   // 1차: 코너에서 조각으로 나누고, 조각마다 다듬은 뒤 선분으로 나눈다(코너는 다듬지 않아 둥글어지지 않음)
   const items = [];
@@ -1204,9 +1205,9 @@ export function extractStrokes(m, w, h, o = {}) {
     ];
     st.closed = true;
   }
-  weldEnds(strokes, 6);
-  finalizeEnds(strokes, 5);
-  finalizeEnds(strokes, 5);
+  weldEnds(strokes, 6 * esc);
+  finalizeEnds(strokes, 5 * esc);
+  finalizeEnds(strokes, 5 * esc);
   for (const d of dashes) {
     let s1 = snap({ dx: d.ux, dy: d.uy, mx: d.cx, my: d.cy });
     const hl = d.len / 2;
@@ -1367,7 +1368,8 @@ export function pruneIsolated(strokes, maxLen, touch, cov = null, w = 0, h = 0) 
       const t = Math.max(0, Math.min(1, ((I.mx - a[0]) * sx + (I.my - a[1]) * sy) / l2));
       if (Math.hypot(I.mx - a[0] - sx * t, I.my - a[1] - sy * t) < R) others.add(kk);
     }
-    if (others.size >= 2) continue;
+    // 원래 크기 이미지(글자 획 보호)에서만 주변 선 많으면 유지. 확대 이미지는 끊긴 조각이면 제거
+    if (touch < 2 && others.size >= 2) continue;
     // 원본에서 주변에 잉크(글자 면 등)가 많으면 남긴다
     if (cov) {
       let ink = 0;
