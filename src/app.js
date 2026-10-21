@@ -29,7 +29,7 @@ setLines(lines);
 // ---------- 변환 ----------
 let worker = null, busy = false, jobId = 0, timer = 0;
 function makeWorker() {
-  worker = new Worker(new URL('./worker.js?v=a1dd2d7e', import.meta.url), { type: 'module' });
+  worker = new Worker(new URL('./worker.js?v=d73e3b08', import.meta.url), { type: 'module' });
   worker.onmessage = onWorker;
 }
 makeWorker();

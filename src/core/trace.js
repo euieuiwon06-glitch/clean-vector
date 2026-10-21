@@ -1,8 +1,8 @@
-import { compositeOnWhite, buildPalette, unmix, denoise } from './palette.js?v=a1dd2d7e';
-import { unifyRepeats } from './repeat.js?v=a1dd2d7e';
-import { extractStrokes, inkCoverage, chainStrokes, pruneIsolated, dedupeParallel, rebuildDashes, rasterizeStrokes } from './strokes.js?v=a1dd2d7e';
-import { maskBounds, upsample, gaussianBlur, preserveThin, marchingSquares } from './contour.js?v=a1dd2d7e';
-import { resampleClosed, analyzeContour, alignRuns, equalizeStrokes, buildPath, fitCircle, snapConcentric } from './fit.js?v=a1dd2d7e';
+import { compositeOnWhite, buildPalette, unmix, denoise } from './palette.js?v=d73e3b08';
+import { unifyRepeats } from './repeat.js?v=d73e3b08';
+import { extractStrokes, inkCoverage, chainStrokes, pruneIsolated, dedupeParallel, rebuildDashes, rasterizeStrokes } from './strokes.js?v=d73e3b08';
+import { maskBounds, upsample, gaussianBlur, preserveThin, marchingSquares } from './contour.js?v=d73e3b08';
+import { resampleClosed, analyzeContour, alignRuns, equalizeStrokes, buildPath, fitCircle, snapConcentric } from './fit.js?v=d73e3b08';
 
 export const DEFAULTS = {
   colors: 'auto',   // 대표색 개수(숫자 또는 auto)
@@ -550,7 +550,7 @@ function flattenFaces(masks, palette, bg, ink, cov, w, h, img) {
       // 옅은 틴트 얼룩은 면 절반 미만이면, 그 외 색은 면의 30% 미만·작은 조각일 때만 면 색으로
       const replace = (pale[c] && (M === bg || pale[M]) && A < px.length * 0.5) || (A < px.length * 0.3 && A < n * 0.003);
       // 면 안의 작은 다른 색 조각(면의 12% 미만)은 경계가 또렷해도 면 색으로 — 단색 면 유지
-      if (!replace && A < px.length * 0.12 && A < n * 0.002) { for (const q of comp) { masks[M][q] = Math.min(1, masks[M][q] + masks[c][q]); masks[c][q] = 0; } continue; }
+      if (!replace && A < px.length * 0.25 && A < n * 0.004) { for (const q of comp) { masks[M][q] = Math.min(1, masks[M][q] + masks[c][q]); masks[c][q] = 0; } continue; }
       if (!replace) continue;
       for (const q of comp) { masks[M][q] = Math.min(1, masks[M][q] + masks[c][q]); masks[c][q] = 0; }
     }
@@ -814,6 +814,26 @@ export function trace(input, opts = {}, progress = () => {}) {
         a += q[0] * p.start[1] - p.start[0] * q[1]; per += Math.hypot(p.start[0] - q[0], p.start[1] - q[1]);
         a = Math.abs(a) / 2;
         return !(per > 0 && (2 * a) / per < 1.2 * sc && a < 400 * sc * sc);
+      });
+    }
+  }
+  // 공통 기준(도면): 선과 같은 색의 면 조각 중 선처럼 가늘고 긴 것(평균 폭이 선 굵기 2.5배 미만)은
+  // 선 옆에 붙은 쐐기·덩어리이므로 지운다. 선이 그 자리를 이미 그리고 있어 굵기가 일정해진다.
+  if (strokes.length && Math.sqrt((w * h) / 1.5e6) > 1.3) {
+    const lineColors = new Set(strokes.map((st) => st.color));
+    const ws = strokes.map((st) => st.width).sort((a, b) => a - b);
+    const lw = ws[Math.floor(ws.length * 0.75)] || 2;
+    for (const l of v.layers) {
+      if (!lineColors.has(l.color)) continue;
+      const sg = outerSign(l.paths);
+      l.paths = l.paths.filter((p) => {
+        if (p.circle || p.ellipse) return true;
+        const a = signedArea(p);
+        if (Math.sign(a) !== sg) return true;
+        let per = 0, q = p.start;
+        for (const g of p.segs) { per += Math.hypot(g.x - q[0], g.y - q[1]); q = [g.x, g.y]; }
+        per += Math.hypot(p.start[0] - q[0], p.start[1] - q[1]);
+        return !(per > 0 && (2 * Math.abs(a)) / per < lw * 2.5);
       });
     }
   }
